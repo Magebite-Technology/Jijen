@@ -343,3 +343,74 @@ def extract_region_contours(source, regions=None):
             )
         )
     return tuple(contours)
+
+
+def create_region_contour_preview(source, region_contours, document=None):
+    """Create one static preview object for each supplied surface region.
+
+    ``region_contours`` is normally the output of
+    :func:`extract_region_contours`; passing the selected subset is what lets
+    the GUI choose a region without asking the user to pick faces manually.
+    The source is never modified and the created objects are ordinary
+    ``Part::Feature`` snapshots (parametric recompute is Phase 6).
+    """
+    if region_contours is None:
+        raise ValueError("Region contour results are required")
+    try:
+        pending = tuple(region_contours)
+    except TypeError as error:
+        raise TypeError("Region contour results must be iterable") from error
+    if document is None and isinstance(source, App.DocumentObject):
+        document = source.Document
+    if document is None:
+        raise ValueError("An output document is required for a raw shape")
+    if not isinstance(document, App.Document):
+        raise TypeError("Output document must be a FreeCAD document")
+
+    # Validate the source before adding any output objects. This also keeps
+    # raw-shape and document-object inputs on the same resolved-coordinate
+    # contract as extraction.
+    _resolve_shape(source)
+    seen = set()
+    for result in pending:
+        region_id = getattr(result, "region_id", None)
+        if not region_id or region_id in seen:
+            raise ValueError("Region contour IDs must be present and unique")
+        seen.add(region_id)
+        if not hasattr(result, "face_indices") or not hasattr(result, "wires"):
+            raise TypeError("Region results must expose face_indices and wires")
+
+    valid = [result for result in pending if result.status == "ok" and result.wires]
+    if not valid:
+        return pending, ()
+
+    created = []
+    document.openTransaction("Preview surface region contours")
+    try:
+        for result in valid:
+            obj = document.addObject("Part::Feature", "RegionContour")
+            obj.Label = "%s contour" % result.region_id
+            obj.Shape = Part.makeCompound(list(result.wires))
+            obj.addProperty("App::PropertyString", "SourceRegionId", "Contour")
+            obj.SourceRegionId = result.region_id
+            obj.addProperty("App::PropertyString", "ComponentId", "Contour")
+            obj.ComponentId = result.component_id
+            obj.addProperty("App::PropertyIntegerList", "SourceFaceIndices", "Contour")
+            obj.SourceFaceIndices = list(result.face_indices)
+            obj.addProperty("App::PropertyString", "ContourStatus", "Contour")
+            obj.ContourStatus = result.status
+            obj.addProperty("App::PropertyString", "Diagnostics", "Contour")
+            obj.Diagnostics = "; ".join(result.diagnostics)
+            if isinstance(source, App.DocumentObject) and source.Document is document:
+                obj.addProperty("App::PropertyLink", "Source", "Contour")
+                obj.Source = source
+            if App.GuiUp:
+                obj.ViewObject.LineColor = (0.1, 0.55, 1.0)
+                obj.ViewObject.LineWidth = 3.0
+            created.append(obj)
+        document.recompute()
+        document.commitTransaction()
+    except Exception:
+        document.abortTransaction()
+        raise
+    return pending, tuple(created)

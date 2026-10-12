@@ -150,6 +150,7 @@ Gui::MenuItem* Workbench::setupMenuBar() const
           << "Part_Thickness"
           << "Part_ProjectionOnSurface"
           << "Part_SectionCut"
+                    << "Part_SurfaceContours"
           << "Separator"
           << "Part_EditAttachment"
           << "Separator"

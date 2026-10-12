@@ -47,7 +47,7 @@ jobs:
           "BUILD_TAG=$tag" >> $env:GITHUB_ENV
           "## Jijen Windows beta" >> $env:GITHUB_STEP_SUMMARY
           "Source: $env:SOURCE_SHA ($env:SOURCE_BRANCH)" >> $env:GITHUB_STEP_SUMMARY
-          "Phase 4 adds grouped-region physical boundary extraction by removing internal native shared edges while preserving holes, curves, seams, and diagnostics. The selection panel is not implemented yet." >> $env:GITHUB_STEP_SUMMARY
+          "Phase 5 adds the object-level surface-contour task panel: select one object, review automatically detected regions, and create one or all grouped physical-boundary previews without manual face picking. The source remains unchanged and the preview API stays GUI-independent." >> $env:GITHUB_STEP_SUMMARY
 
       - name: Set up the locked build environment
         uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
@@ -75,7 +75,7 @@ jobs:
           $bundles = @(Get-ChildItem -LiteralPath package/bundle/windows -Directory -Filter "FreeCAD_$($env:BUILD_TAG)-Windows-*")
           if ($bundles.Count -ne 1) { throw "Expected one beta bundle" }
           $exe = Join-Path $bundles[0].FullName 'bin/freecadcmd.exe'
-          $testCode = 'import unittest; from parttests.TestSurfaceContourFixtures import TestSurfaceContourFixtures; from parttests.TestSurfaceContours import TestSurfaceContours; from parttests.TestSurfaceRegions import TestSurfaceRegions; from parttests.TestRegionContours import TestRegionContours; suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(case) for case in (TestSurfaceContourFixtures, TestSurfaceContours, TestSurfaceRegions, TestRegionContours)); result = unittest.TextTestRunner(verbosity=2).run(suite); print("JIJEN_BETA_FIXTURES_OK" if result.wasSuccessful() and result.testsRun == 46 else "JIJEN_BETA_FIXTURES_FAILED")'
+          $testCode = 'import unittest; from parttests.TestSurfaceContourFixtures import TestSurfaceContourFixtures; from parttests.TestSurfaceContours import TestSurfaceContours; from parttests.TestSurfaceRegions import TestSurfaceRegions; from parttests.TestRegionContours import TestRegionContours; from parttests.TestSurfaceContourGui import TestSurfaceContourGui; suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(case) for case in (TestSurfaceContourFixtures, TestSurfaceContours, TestSurfaceRegions, TestRegionContours, TestSurfaceContourGui)); result = unittest.TextTestRunner(verbosity=2).run(suite); print("JIJEN_BETA_FIXTURES_OK" if result.wasSuccessful() and result.testsRun == 52 else "JIJEN_BETA_FIXTURES_FAILED")'
           $output = & $exe --safe-mode --console $testCode 2>&1
           $exitCode = $LASTEXITCODE
           $output | Tee-Object -FilePath beta-fixture-tests.log
@@ -95,7 +95,7 @@ jobs:
             throw "Missing beta packages or SHA256 files"
           }
           $assets = @($archives + $installers + $hashes | ForEach-Object { $_.FullName })
-          $notes = "Windows x64 beta from $env:SOURCE_BRANCH, commit $env:SOURCE_SHA. Includes Phase 4 grouped-region physical boundary extraction plus Phase 3 detection and Phase 2 individual-face 3D boundaries, holes, periodic-seam handling, and static Python-console previews. The selection panel is not implemented yet. Portable archive and installer are unsigned. Packaged startup, Pivy, and all 46 surface-contour tests must pass before publication."
+          $notes = "Windows x64 beta from $env:SOURCE_BRANCH, commit $env:SOURCE_SHA. Includes Phase 5 object-level contour task panel, grouped physical-boundary previews, Phase 3 detection, Phase 2 individual-face 3D boundaries, holes, periodic-seam handling, and static Python-console previews. The panel accepts one object and lists detected regions; it does not require manual face picking. Portable archive and installer are unsigned. Packaged startup, Pivy, and all 52 surface-contour tests must pass before publication."
           gh release create $env:BUILD_TAG @assets --target $env:SOURCE_SHA --title "Jijen Windows beta $env:BUILD_TAG" --notes $notes --prerelease --latest=false
           if ($LASTEXITCODE -ne 0) { throw "Beta publication failed" }
           $url = gh release view $env:BUILD_TAG --json url --jq .url
