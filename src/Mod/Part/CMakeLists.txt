@@ -15,6 +15,7 @@ set(Part_Scripts
     Init.py
     JoinFeatures.py
     MakeBottle.py
+    SurfaceContours.py
     PartEnums.py
     TestPartApp.py
 )
@@ -78,6 +79,7 @@ set(Part_tests
     parttests/part_test_objects.py
     parttests/surface_contour_fixtures.py
     parttests/TestSurfaceContourFixtures.py
+    parttests/TestSurfaceContours.py
     parttests/regression_tests.py
     parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py

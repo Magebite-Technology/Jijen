@@ -44,6 +44,7 @@ from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.TestFaceMakerUnifiedPlanar import *
 from parttests.TestFaceMakerUnifiedNonPlanar import *
 from parttests.TestSurfaceContourFixtures import TestSurfaceContourFixtures
+from parttests.TestSurfaceContours import TestSurfaceContours
 
 
 # ---------------------------------------------------------------------------
