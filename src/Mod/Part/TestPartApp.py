@@ -45,6 +45,7 @@ from parttests.TestFaceMakerUnifiedPlanar import *
 from parttests.TestFaceMakerUnifiedNonPlanar import *
 from parttests.TestSurfaceContourFixtures import TestSurfaceContourFixtures
 from parttests.TestSurfaceContours import TestSurfaceContours
+from parttests.TestSurfaceRegions import TestSurfaceRegions
 
 
 # ---------------------------------------------------------------------------
