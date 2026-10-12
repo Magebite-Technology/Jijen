@@ -47,7 +47,7 @@ This preserves curved edges, circular holes, multiple wires, periodic seam handl
 
 ## Validation
 
-Ten Phase 4 tests cover subdivided-face merging, cube and pyramid loops, holes, individual-policy compatibility, automatic detection, disconnected components, curved and periodic faces, explicit subsets, validation errors, links, immutability, and deterministic metadata. Together with Phases 1 to 3, the Windows beta gate requires 45 tests against the packaged application.
+Ten Phase 4 tests cover subdivided-face merging, cube and pyramid loops, holes, individual-policy compatibility, automatic detection, disconnected components, curved and periodic faces, explicit subsets, validation errors, links, immutability, and deterministic metadata. Together with Phases 1 to 3, the Windows beta gate requires 46 tests against the packaged application.
 
 ## Deliberate limits
 
