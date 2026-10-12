@@ -296,6 +296,7 @@ class SemanticRegionContourFeature:
     """Parametric contour feature driven by a semantic role, not face picks."""
 
     def __init__(self, obj):
+        obj.Proxy = self
         self._ensure(obj, "App::PropertyLink", "Source")
         self._ensure(obj, "App::PropertyEnumeration", "GroupingPolicy")
         obj.GroupingPolicy = list(_POLICIES)
