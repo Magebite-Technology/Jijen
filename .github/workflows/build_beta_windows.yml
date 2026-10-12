@@ -109,5 +109,3 @@ jobs:
           path: beta-fixture-tests.log
           if-no-files-found: ignore
           retention-days: 7
-
-#
