@@ -109,10 +109,3 @@ jobs:
           path: beta-fixture-tests.log
           if-no-files-found: ignore
           retention-days: 7
-
-Part: implement Phase 2 individual-face contours
-
-Preserve native 3D boundary curves and holes, exclude periodic seams,
-and add static previews with diagnostics and 14 geometry tests.
-
-Assisted-by: GPT-6
