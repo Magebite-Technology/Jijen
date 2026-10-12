@@ -295,7 +295,7 @@ def _role_summary(region):
 class SemanticRegionContourFeature:
     """Parametric contour feature driven by a semantic role, not face picks."""
 
-        obj.Proxy = self
+    def __init__(self, obj):
         self._ensure(obj, "App::PropertyLink", "Source")
         self._ensure(obj, "App::PropertyEnumeration", "GroupingPolicy")
         obj.GroupingPolicy = list(_POLICIES)
@@ -410,8 +410,8 @@ def create_semantic_region_contour(
     """
     if not isinstance(source, App.DocumentObject):
         raise TypeError("A document object is required for a parametric contour")
-        if role not in _ROLES:
-                raise ValueError("Role must be one of all, top, bottom, side, sole_candidate, or unknown")
+    if role not in _ROLES:
+        raise ValueError("Role must be one of all, top, bottom, side, sole_candidate, or unknown")
     if policy not in _POLICIES:
         raise ValueError("Policy must be 'individual' or 'coplanar'")
     direction = _normalise_direction(reference_direction)
