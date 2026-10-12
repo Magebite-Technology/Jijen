@@ -18,6 +18,7 @@ set(Part_Scripts
     SurfaceContours.py
     SurfaceContourGui.py
     SurfaceRegions.py
+    SurfaceSemantics.py
     PartEnums.py
     TestPartApp.py
 )
@@ -58,7 +59,6 @@ set(BOPTools_Scripts
     BOPTools/BOPFeatures.py
     BOPTools/GeneralFuseResult.py
     BOPTools/JoinAPI.py
-    BOPTools/JoinFeatures.py
     BOPTools/ShapeMerge.py
     BOPTools/SplitAPI.py
     BOPTools/SplitFeatures.py
@@ -86,6 +86,7 @@ set(Part_tests
     parttests/TestRegionContours.py
     parttests/TestSurfaceContourGui.py
     parttests/TestSurfaceContourParametric.py
+    parttests/TestSurfaceSemantics.py
     parttests/regression_tests.py
     parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py

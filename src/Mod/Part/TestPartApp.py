@@ -49,6 +49,8 @@ from parttests.TestSurfaceRegions import TestSurfaceRegions
 from parttests.TestRegionContours import TestRegionContours
 from parttests.TestSurfaceContourGui import TestSurfaceContourGui
 from parttests.TestSurfaceContourParametric import TestSurfaceContourParametric
+from parttests.TestSurfaceSemantics import TestSurfaceSemantics
+from parttests.TestSurfaceSemantics import TestSurfaceSemantics
 
 
 # ---------------------------------------------------------------------------

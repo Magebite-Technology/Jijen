@@ -427,6 +427,7 @@ class RegionContourFeature:
     _POLICIES = ("coplanar", "individual")
 
     def __init__(self, obj):
+        obj.Proxy = self
         self._ensure_property(obj, "App::PropertyLink", "Source")
         self._ensure_property(obj, "App::PropertyEnumeration", "GroupingPolicy")
         obj.GroupingPolicy = list(self._POLICIES)
