@@ -76,6 +76,8 @@ set(Part_tests
     parttests/BRep_tests.py
     parttests/Geom2d_tests.py
     parttests/part_test_objects.py
+    parttests/surface_contour_fixtures.py
+    parttests/TestSurfaceContourFixtures.py
     parttests/regression_tests.py
     parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py
