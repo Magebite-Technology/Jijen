@@ -86,7 +86,8 @@ set(Part_tests
     parttests/TestRegionContours.py
     parttests/TestSurfaceContourGui.py
     parttests/TestSurfaceContourParametric.py
-    parttests/regression_tests.py    parttests/TopoShapeListTest.py
+    parttests/regression_tests.py
+        parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py
     parttests/ColorTransparencyTest.py
     parttests/TaskFaceAppearancesTest.py
