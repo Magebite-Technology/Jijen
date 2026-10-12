@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""GUI workflow for object-level surface contour extraction.
+"""GUI workflow for object-level parametric surface contour extraction.
 
 The command deliberately asks for one object, not a list of manually picked
-faces.  Region detection and contour geometry remain in the GUI-independent
-SurfaceRegions and SurfaceContours modules; this file only presents those
-results and creates the requested snapshot previews.
+faces. Region detection and contour geometry remain in the GUI-independent
+SurfaceRegions and SurfaceContours modules; this file presents those results
+and creates linked, recomputable preview features.
 """
 
 import FreeCAD as App
@@ -14,12 +14,7 @@ import SurfaceRegions as regions
 
 
 def selected_document_object(selection):
-    """Return the only selected document object, or ``None``.
-
-    Keeping this small policy helper GUI-independent makes the selection
-    contract testable in ``freecadcmd`` and prevents accidental face-level
-    selection from entering the extraction API.
-    """
+    """Return the only selected document object, or ``None``."""
     if selection is None or len(selection) != 1:
         return None
     candidate = selection[0]
@@ -59,7 +54,8 @@ if App.GuiUp:
 
             intro = QtWidgets.QLabel(
                 "Select one object in the model tree. Regions are detected automatically; "
-                "no individual face picking is needed."
+                "no individual face picking is needed. Created previews stay linked to "
+                "the source and update on recompute."
             )
             intro.setWordWrap(True)
             layout.addWidget(intro)
@@ -93,9 +89,9 @@ if App.GuiUp:
             layout.addWidget(self.detail_label)
 
             actions = QtWidgets.QHBoxLayout()
-            self.create_button = QtWidgets.QPushButton("Create selected contour preview")
+            self.create_button = QtWidgets.QPushButton("Create parametric preview")
             self.create_button.clicked.connect(self.create_selected)
-            self.create_all_button = QtWidgets.QPushButton("Create all previews")
+            self.create_all_button = QtWidgets.QPushButton("Create all parametric previews")
             self.create_all_button.clicked.connect(self.create_all)
             actions.addWidget(self.create_button)
             actions.addWidget(self.create_all_button)
@@ -165,8 +161,8 @@ if App.GuiUp:
                 self.create_button.setEnabled(bool(self.results))
                 self.create_all_button.setEnabled(bool(self.results))
                 self._set_status(
-                    "%d region(s) detected. Choose a row to create one contour preview."
-                    % len(self.results)
+                    "%d region(s) detected. Created previews will update when the source "
+                    "is recomputed." % len(self.results)
                 )
             finally:
                 self._building = False
@@ -187,21 +183,30 @@ if App.GuiUp:
                 self._set_status("Select exactly one object before creating a preview.", error=True)
                 return ()
             try:
-                results, created = contours.create_region_contour_preview(
-                    self.source, selected
+                created = (
+                    contours.create_parametric_region_contour(
+                        self.source,
+                        region_ids=[result.region_id for result in selected],
+                        policy=self._policy(),
+                    ),
                 )
             except Exception as error:
                 self._set_status("Preview creation failed: %s" % error, error=True)
                 return ()
-            if not created:
-                self._set_status(
-                    "No selected region has a valid physical boundary to preview.", error=True
-                )
-                return ()
             Gui.Selection.clearSelection()
             for obj in created:
                 Gui.Selection.addSelection(obj)
-            self._set_status("Created %d contour preview object(s)." % len(created))
+            status = created[0].ContourStatus
+            if status in ("error", "missing_source", "no_region", "no_boundary"):
+                self._set_status(
+                    "Created parametric preview with status %s: %s"
+                    % (status, created[0].Diagnostics or created[0].LastError),
+                    error=True,
+                )
+            else:
+                self._set_status(
+                    "Created parametric contour preview; it follows source recomputes."
+                )
             return created
 
         def create_selected(self):
@@ -215,9 +220,6 @@ if App.GuiUp:
             return self._create(self.results)
 
         def accept(self):
-            # The task-panel OK action is intentionally equivalent to creating
-            # the currently selected preview, while the explicit buttons stay
-            # available for creating one or all previews without closing.
             self.create_selected()
 
         def reject(self):
@@ -228,7 +230,7 @@ if App.GuiUp:
         def GetResources(self):
             return {
                 "MenuText": "Surface contours",
-                "ToolTip": "Detect surface regions and create physical contour previews",
+                "ToolTip": "Detect surface regions and create parametric contour previews",
                 "Accel": "",
             }
 
@@ -247,4 +249,3 @@ else:
 
         def __init__(self):
             raise RuntimeError("Surface contour task panel requires FreeCADGui")
-

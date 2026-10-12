@@ -352,7 +352,7 @@ def create_region_contour_preview(source, region_contours, document=None):
     :func:`extract_region_contours`; passing the selected subset is what lets
     the GUI choose a region without asking the user to pick faces manually.
     The source is never modified and the created objects are ordinary
-    ``Part::Feature`` snapshots (parametric recompute is Phase 6).
+    ``Part::Feature`` snapshots (this function stays static; use create_parametric_region_contour() for recomputable previews).
     """
     if region_contours is None:
         raise ValueError("Region contour results are required")
@@ -414,3 +414,155 @@ def create_region_contour_preview(source, region_contours, document=None):
         document.abortTransaction()
         raise
     return pending, tuple(created)
+
+
+class RegionContourFeature:
+    """Parametric proxy that rebuilds selected region contours on recompute.
+
+    Region IDs and face indices are revision-local.  The proxy deliberately
+    re-detects regions from the current source shape instead of trying to
+    persist topology sub-element references across edits.
+    """
+
+    _POLICIES = ("coplanar", "individual")
+
+    def __init__(self, obj):
+        self._ensure_property(obj, "App::PropertyLink", "Source")
+        self._ensure_property(obj, "App::PropertyEnumeration", "GroupingPolicy")
+        obj.GroupingPolicy = list(self._POLICIES)
+        if obj.GroupingPolicy not in self._POLICIES:
+            obj.GroupingPolicy = "coplanar"
+        self._ensure_property(obj, "App::PropertyStringList", "RegionIds")
+        self._ensure_property(obj, "App::PropertyStringList", "ResolvedRegionIds")
+        self._ensure_property(obj, "App::PropertyStringList", "ComponentIds")
+        self._ensure_property(obj, "App::PropertyIntegerList", "SourceFaceIndices")
+        self._ensure_property(obj, "App::PropertyString", "ContourStatus")
+        self._ensure_property(obj, "App::PropertyString", "Diagnostics")
+        self._ensure_property(obj, "App::PropertyString", "LastError")
+        for name in (
+            "ResolvedRegionIds",
+            "ComponentIds",
+            "SourceFaceIndices",
+            "ContourStatus",
+            "Diagnostics",
+            "LastError",
+        ):
+            try:
+                obj.setEditorMode(name, 1)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _ensure_property(obj, property_type, name):
+        if name not in obj.PropertiesList:
+            obj.addProperty(property_type, name, "Contour")
+
+    @staticmethod
+    def _set_result_metadata(obj, selected, diagnostics=()):
+        obj.ResolvedRegionIds = [result.region_id for result in selected]
+        obj.ComponentIds = [result.component_id for result in selected]
+        obj.SourceFaceIndices = sorted(
+            {index for result in selected for index in result.face_indices}
+        )
+        messages = set(diagnostics)
+        for result in selected:
+            messages.update(result.diagnostics)
+        obj.Diagnostics = "; ".join(sorted(messages))
+
+    def execute(self, obj):
+        obj.LastError = ""
+        source = getattr(obj, "Source", None)
+        if source is None:
+            obj.Shape = Part.Shape()
+            obj.ResolvedRegionIds = []
+            obj.ComponentIds = []
+            obj.SourceFaceIndices = []
+            obj.ContourStatus = "missing_source"
+            obj.Diagnostics = "Choose a source document object"
+            return
+
+        try:
+            from SurfaceRegions import detect_surface_regions
+
+            detection = detect_surface_regions(
+                source, policy=getattr(obj, "GroupingPolicy", "coplanar")
+            )
+            results = extract_region_contours(source, detection)
+            requested = set(getattr(obj, "RegionIds", ()))
+            selected = (
+                [result for result in results if result.region_id in requested]
+                if requested
+                else list(results)
+            )
+            missing = requested.difference(result.region_id for result in selected)
+            diagnostics = [
+                "Requested region is not present in the current source revision: %s"
+                % region_id
+                for region_id in sorted(missing)
+            ]
+            self._set_result_metadata(obj, selected, diagnostics)
+            valid = [
+                result for result in selected if result.status == "ok" and result.wires
+            ]
+            wires = [wire for result in valid for wire in result.wires]
+            obj.Shape = Part.makeCompound(wires) if wires else Part.Shape()
+            if not selected:
+                obj.ContourStatus = "no_region"
+            elif not wires:
+                obj.ContourStatus = "no_boundary"
+            elif len(valid) == len(selected):
+                obj.ContourStatus = "ok"
+            else:
+                obj.ContourStatus = "partial"
+        except Exception as error:
+            obj.Shape = Part.Shape()
+            obj.ResolvedRegionIds = []
+            obj.ComponentIds = []
+            obj.SourceFaceIndices = []
+            obj.ContourStatus = "error"
+            obj.Diagnostics = ""
+            obj.LastError = str(error)
+
+
+def create_parametric_region_contour(
+    source, region_ids=None, policy="coplanar", document=None
+):
+    """Create a recomputable region-contour feature linked to ``source``.
+
+    The source must be a document object so the dependency graph can trigger
+    the proxy on recompute.  ``region_ids`` is empty/None for all regions;
+    non-empty values select region IDs from the current detection revision.
+    """
+    if not isinstance(source, App.DocumentObject):
+        raise TypeError("A document object is required for a parametric contour")
+    if policy not in RegionContourFeature._POLICIES:
+        raise ValueError("Policy must be 'individual' or 'coplanar'")
+    if document is None:
+        document = source.Document
+    if not isinstance(document, App.Document):
+        raise TypeError("Output document must be a FreeCAD document")
+    if source.Document is not document:
+        raise ValueError("The source and parametric output must share a document")
+    requested = [] if region_ids is None else list(region_ids)
+    if any(not isinstance(region_id, str) or not region_id for region_id in requested):
+        raise ValueError("Region IDs must be non-empty strings")
+    if len(set(requested)) != len(requested):
+        raise ValueError("Region IDs must be unique")
+
+    document.openTransaction("Create parametric surface contour")
+    try:
+        obj = document.addObject("Part::FeaturePython", "RegionContourParametric")
+        obj.Label = "Surface contours (%s)" % source.Label
+        RegionContourFeature(obj)
+        obj.Source = source
+        obj.GroupingPolicy = policy
+        obj.RegionIds = requested
+        if App.GuiUp:
+            obj.ViewObject.LineColor = (0.1, 0.55, 1.0)
+            obj.ViewObject.LineWidth = 3.0
+        document.recompute()
+        document.commitTransaction()
+    except Exception:
+        document.abortTransaction()
+        raise
+    return obj
