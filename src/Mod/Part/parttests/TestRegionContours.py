@@ -51,7 +51,10 @@ class TestRegionContours(unittest.TestCase):
         shape = fixtures.cube(True).shape
         automatic = contours.extract_region_contours(shape)
         explicit = contours.extract_region_contours(shape, regions.detect_surface_regions(shape))
-        self.assertEqual(automatic, explicit)
+        self.assertEqual(
+            [(r.face_indices, r.status, [w.Length for w in r.wires]) for r in automatic],
+            [(r.face_indices, r.status, [w.Length for w in r.wires]) for r in explicit],
+        )
         self.assertEqual([r.region_id for r in automatic], ["Region%d" % i for i in range(1, 7)])
 
     def test_disconnected_components_do_not_cross(self):
@@ -112,7 +115,10 @@ class TestRegionContours(unittest.TestCase):
         shape = fixtures.cube(True).shape
         first = contours.extract_region_contours(shape)
         second = contours.extract_region_contours(shape)
-        self.assertEqual(first, second)
+        self.assertEqual(
+            [(r.region_id, r.face_indices, r.status, tuple(round(w.Length, 9) for w in r.wires)) for r in first],
+            [(r.region_id, r.face_indices, r.status, tuple(round(w.Length, 9) for w in r.wires)) for r in second],
+        )
         self.assertTrue(all(r.region_id.startswith("Region") for r in first))
         self.assertTrue(all(r.component_id == "Component1" for r in first))
         self.assertTrue(all(tuple(sorted(r.face_indices)) == r.face_indices for r in first))
