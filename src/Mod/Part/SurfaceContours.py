@@ -198,3 +198,148 @@ def create_contour_preview(source, face_indices=None, document=None):
         document.abortTransaction()
         raise
     return results, tuple(created)
+
+
+@dataclass(frozen=True)
+class RegionContour:
+    """Physical boundary wires for one detected surface region."""
+
+    region_id: str
+    component_id: str
+    face_indices: tuple
+    status: str
+    wires: tuple = ()
+    diagnostics: tuple = ()
+
+
+class _NativeShapeIndex:
+    """Hash buckets accelerate topology identity lookup; collisions use isSame."""
+
+    def __init__(self):
+        self.shapes = []
+        self.buckets = {}
+
+    def add(self, shape):
+        bucket = self.buckets.setdefault(shape.hashCode(), [])
+        for index in bucket:
+            if shape.isSame(self.shapes[index]):
+                return index
+        index = len(self.shapes)
+        self.shapes.append(shape)
+        bucket.append(index)
+        return index
+
+
+def _normalise_region_groups(regions, face_count):
+    if hasattr(regions, "regions"):
+        regions = regions.regions
+    elif hasattr(regions, "face_indices"):
+        regions = (regions,)
+    if regions is None:
+        raise ValueError("Surface regions are required")
+
+    normalised = []
+    claimed = set()
+    for ordinal, region in enumerate(regions, 1):
+        indices = getattr(region, "face_indices", region)
+        try:
+            indices = tuple(sorted(set(indices)))
+        except TypeError as error:
+            raise ValueError("Region face indices must be an iterable of integers") from error
+        if not indices:
+            raise ValueError("A surface region must contain at least one face")
+        if any(type(index) is not int or index < 0 or index >= face_count for index in indices):
+            raise ValueError("Region face indices must be within the resolved face range")
+        overlap = claimed.intersection(indices)
+        if overlap:
+            raise ValueError("Surface regions must not assign a face more than once")
+        claimed.update(indices)
+        normalised.append(
+            (
+                getattr(region, "region_id", "Region%d" % ordinal),
+                getattr(region, "component_id", "UnknownComponent"),
+                indices,
+                getattr(region, "status", "ok"),
+                tuple(getattr(region, "diagnostics", ())),
+            )
+        )
+    return tuple(normalised)
+
+
+def _extract_region_boundary(shape, face_indices):
+    edge_index = _NativeShapeIndex()
+    occurrences = []
+    diagnostics = set()
+    try:
+        for face_index in face_indices:
+            face = shape.Faces[face_index]
+            if not face.isValid():
+                return (), "invalid_geometry", ("Invalid source face",)
+            for wire in face.Wires:
+                for edge in wire.OrderedEdges:
+                    if edge.Degenerated or edge.isSeam(face):
+                        continue
+                    edge_id = edge_index.add(edge)
+                    occurrences.append((edge_id, edge.copy(), face_index))
+    except Exception as error:
+        return (), "invalid_geometry", (str(error),)
+
+    grouped = {}
+    for edge_id, edge, face_index in occurrences:
+        grouped.setdefault(edge_id, []).append((edge, face_index))
+
+    boundary_edges = []
+    non_manifold = False
+    for edge_id in sorted(grouped):
+        members = grouped[edge_id]
+        if len(members) == 1:
+            boundary_edges.append(members[0][0])
+        elif len(members) == 2:
+            if members[0][1] == members[1][1]:
+                non_manifold = True
+                diagnostics.add("An edge occurs twice on one selected face")
+        else:
+            non_manifold = True
+            diagnostics.add("Boundary edge has %d selected incidences" % len(members))
+
+    if not boundary_edges:
+        return (), "non_manifold" if non_manifold else "no_boundary", tuple(sorted(diagnostics))
+
+    wires, assembly_status, assembly_diagnostics = _assemble_wires(boundary_edges)
+    diagnostics.update(assembly_diagnostics)
+    status = "non_manifold" if non_manifold else assembly_status
+    return wires, status, tuple(sorted(diagnostics))
+
+
+def extract_region_contours(source, regions=None):
+    """Extract physical boundaries after internal region edges are removed.
+
+    The regions argument may be a RegionDetection object, one SurfaceRegion,
+    or a sequence of region-like objects/face-index iterables. When omitted,
+    conservative Phase 3 coplanar detection runs automatically. Native edge
+    identity, not geometric coincidence, decides which edges are internal.
+    Curves, holes, and periodic seams retain Phase 2 handling. No source shape
+    or document object is modified.
+    """
+    shape = _resolve_shape(source)
+    if regions is None:
+        from SurfaceRegions import detect_surface_regions
+
+        regions = detect_surface_regions(shape)
+    groups = _normalise_region_groups(regions, len(shape.Faces))
+    contours = []
+    for region_id, component_id, face_indices, input_status, input_diagnostics in groups:
+        wires, extracted_status, extracted_diagnostics = _extract_region_boundary(shape, face_indices)
+        diagnostics = tuple(sorted(set(input_diagnostics).union(extracted_diagnostics)))
+        status = input_status if input_status != "ok" else extracted_status
+        contours.append(
+            RegionContour(
+                region_id,
+                component_id,
+                face_indices,
+                status,
+                tuple(wires),
+                diagnostics,
+            )
+        )
+    return tuple(contours)

@@ -82,6 +82,7 @@ set(Part_tests
     parttests/TestSurfaceContourFixtures.py
     parttests/TestSurfaceContours.py
     parttests/TestSurfaceRegions.py
+    parttests/TestRegionContours.py
     parttests/regression_tests.py
     parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py
