@@ -3,25 +3,22 @@ name: Jijen Windows Beta
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - feature/surface-contours-phase-1
-    paths:
-      - .github/workflows/build_beta_windows.yml
-      - src/Mod/Part/**
-      - package/**
-      - freecad_version.txt
-# Phase 7 semantic role-aware contour triggers
+
+# Python changes use the fast test workflow; request this beta explicitly.
 
 permissions:
   contents: read
 
 concurrency:
   group: jijen-windows-beta-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
+  contour-tests:
+    uses: ./.github/workflows/test_surface_contours.yml
+
   windows-beta:
+    needs: contour-tests
     runs-on: windows-2022
     timeout-minutes: 360
     permissions:
@@ -30,6 +27,9 @@ jobs:
       TARGET_PLATFORM: win-64
       WINDOWS_SIGN_RELEASE: "0"
       MAKE_INSTALLER: "true"
+      JIJEN_VALIDATE_CONTOURS: "1"
+      CCACHE_DIR: D:/jijen-ccache
+      CCACHE_MAXSIZE: 2G
       UPLOAD_RELEASE: "false"
       SOURCE_SHA: ${{ github.sha }}
       SOURCE_BRANCH: ${{ github.ref_name }}
@@ -57,15 +57,30 @@ jobs:
         uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
         with:
           pixi-version: v0.81.0
-          cache: false
+          cache: true
           locked: true
+
+      - name: Restore compiler cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: D:/jijen-ccache
+          key: windows-ccache-${{ hashFiles('pixi.lock', 'CMakePresets.json') }}-${{ github.sha }}
+          restore-keys: |
+            windows-ccache-${{ hashFiles('pixi.lock', 'CMakePresets.json') }}-
 
       - name: Compile and install Jijen
         shell: bash
         run: |
           set -euo pipefail
           python3 package/scripts/write_version_info.py ../freecad_version.txt
+          export CMAKE_ARGS="${CMAKE_ARGS:-} -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
           pixi run --locked bash package/bundle/build.sh
+          pixi run --locked ccache --show-stats
+
+      - name: Validate installed contour tests before packaging
+        run: |
+          pixi run --locked pwsh -NoProfile -File .github/scripts/invoke_surface_contour_tests.ps1 -Executable .pixi/envs/default/Library/bin/freecadcmd.exe -PartPath .pixi/envs/default/Library/Mod/Part -LogPath installed-contour-tests.log
+          if ($LASTEXITCODE -ne 0) { throw "Installed contour validation failed" }
 
       - name: Create portable package and installer
         shell: bash
@@ -73,19 +88,6 @@ jobs:
           set -euo pipefail
           cd package/bundle/windows
           pixi run --locked bash create_bundle.sh
-
-      - name: Validate packaged surface contour tests
-        run: |
-          $bundles = @(Get-ChildItem -LiteralPath package/bundle/windows -Directory -Filter "FreeCAD_$($env:BUILD_TAG)-Windows-*")
-          if ($bundles.Count -ne 1) { throw "Expected one beta bundle" }
-          $exe = Join-Path $bundles[0].FullName 'bin/freecadcmd.exe'
-          $testCode = 'import unittest; from parttests.TestSurfaceContourFixtures import TestSurfaceContourFixtures; from parttests.TestSurfaceContours import TestSurfaceContours; from parttests.TestSurfaceRegions import TestSurfaceRegions; from parttests.TestRegionContours import TestRegionContours; from parttests.TestSurfaceContourGui import TestSurfaceContourGui; from parttests.TestSurfaceContourParametric import TestSurfaceContourParametric; from parttests.TestSurfaceSemantics import TestSurfaceSemantics; suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(case) for case in (TestSurfaceContourFixtures, TestSurfaceContours, TestSurfaceRegions, TestRegionContours, TestSurfaceContourGui, TestSurfaceContourParametric, TestSurfaceSemantics)); result = unittest.TextTestRunner(verbosity=2).run(suite); print("JIJEN_BETA_FIXTURES_OK" if result.wasSuccessful() and result.testsRun == 67 else "JIJEN_BETA_FIXTURES_FAILED")'
-          $output = & $exe --safe-mode --console $testCode 2>&1
-          $exitCode = $LASTEXITCODE
-          $output | Tee-Object -FilePath beta-fixture-tests.log
-          if ($exitCode -ne 0 -or @($output | ForEach-Object { $_.ToString().Trim() }) -notcontains 'JIJEN_BETA_FIXTURES_OK') {
-            throw "Packaged fixture validation failed"
-          }
 
       - name: Publish the Windows beta prerelease
         env:
@@ -99,7 +101,7 @@ jobs:
             throw "Missing beta packages or SHA256 files"
           }
           $assets = @($archives + $installers + $hashes | ForEach-Object { $_.FullName })
-          $notes = "Windows x64 beta from $env:SOURCE_BRANCH, commit $env:SOURCE_SHA. Includes Phase 7 semantic surface-role classification with reference directions and confidence-scored top, bottom, side, sole-candidate, and unknown roles; Phase 6 parametric contour previews; the Phase 5 object-level contour task panel; grouped physical-boundary previews; Phase 3 detection; Phase 2 individual-face 3D boundaries; holes; periodic-seam handling; and static Python-console previews. The panel accepts one object and does not require manual face picking. Semantic classification is heuristic and inspectable. Portable archive and installer are unsigned. Packaged startup, Pivy, and all 67 surface-contour tests must pass before publication."
+          $notes = "Windows x64 beta from $env:SOURCE_BRANCH, commit $env:SOURCE_SHA. Includes Phase 7 semantic surface-role classification with reference directions and confidence-scored top, bottom, side, sole-candidate, and unknown roles; Phase 6 parametric contour previews; the Phase 5 object-level contour task panel; grouped physical-boundary previews; Phase 3 detection; Phase 2 individual-face 3D boundaries; holes; periodic-seam handling; and static Python-console previews. The panel accepts one object and does not require manual face picking. Semantic classification is heuristic and inspectable. Portable archive and installer are unsigned. Packaged startup, Pivy, and all surface-contour tests must pass before publication."
           gh release create $env:BUILD_TAG @assets --target $env:SOURCE_SHA --title "Jijen Windows beta $env:BUILD_TAG" --notes $notes --prerelease --latest=false
           if ($LASTEXITCODE -ne 0) { throw "Beta publication failed" }
           $url = gh release view $env:BUILD_TAG --json url --jq .url
@@ -110,6 +112,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: windows-beta-test-log-${{ github.run_id }}
-          path: beta-fixture-tests.log
+          path: |
+            installed-contour-tests.log
+            beta-fixture-tests.log
           if-no-files-found: ignore
           retention-days: 7

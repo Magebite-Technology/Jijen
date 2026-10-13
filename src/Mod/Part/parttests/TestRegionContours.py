@@ -21,6 +21,18 @@ class TestRegionContours(unittest.TestCase):
             self.assertEqual(len(result.wires[0].Edges), 4)
             self.assertAlmostEqual(result.wires[0].Length, 80)
 
+    def test_region_boundary_keeps_shared_vertices_until_assembly(self):
+        shape = fixtures.cube().shape
+        before = shape.exportBrepToString()
+        wires, status, diagnostics = contours._extract_region_boundary(shape, (0,))
+        self.assertEqual(status, "ok", diagnostics)
+        expected = contours.extract_face_contours(shape)[0]
+        self.assertEqual(len(wires), len(expected.wires))
+        self.assertEqual(len(wires[0].Edges), 4)
+        self.assertTrue(wires[0].isClosed())
+        self.assertAlmostEqual(wires[0].Length, expected.wires[0].Length)
+        self.assertEqual(shape.exportBrepToString(), before)
+
     def test_cube_and_pyramid_keep_outer_boundaries(self):
         for fixture in (fixtures.cube(), fixtures.pyramid()):
             results = contours.extract_region_contours(fixture.shape)

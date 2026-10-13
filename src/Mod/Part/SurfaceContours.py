@@ -284,7 +284,9 @@ def _extract_region_boundary(shape, face_indices):
                     if edge.Degenerated or edge.isSeam(face):
                         continue
                     edge_id = edge_index.add(edge)
-                    occurrences.append((edge_id, edge.copy(), face_index))
+                    # Keep shared native vertices until boundary assembly.
+                    # Independently copying edges disconnects closed loops.
+                    occurrences.append((edge_id, edge, face_index))
     except Exception as error:
         return (), "invalid_geometry", (str(error),)
 

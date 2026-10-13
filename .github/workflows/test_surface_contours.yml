@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Surface Contour Tests
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches:
+      - feature/surface-contours-phase-1
+    paths:
+      - src/Mod/Part/**
+      - .github/scripts/*surface_contour*
+      - .github/workflows/test_surface_contours.yml
+      - .github/workflows/build_beta_windows.yml
+  pull_request:
+    paths:
+      - src/Mod/Part/**
+      - .github/scripts/*surface_contour*
+      - .github/workflows/test_surface_contours.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contour-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contours:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      FREECAD_ASSET: FreeCAD_1.1.4-Windows-x86_64-py311.7z
+      FREECAD_URL: https://github.com/FreeCAD/FreeCAD/releases/download/1.1.4
+    steps:
+      - name: Check out contour source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Restore official runtime archive
+        id: runtime-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: .ci-runtime-download
+          key: freecad-windows-1.1.4-py311-v1
+      - name: Download and verify official runtime
+        run: |
+          New-Item -ItemType Directory -Force -Path .ci-runtime-download | Out-Null
+          $archive = Join-Path .ci-runtime-download $env:FREECAD_ASSET
+          $checksum = "$archive-SHA256.txt"
+          if (!(Test-Path -LiteralPath $archive)) {
+            Invoke-WebRequest "$env:FREECAD_URL/$env:FREECAD_ASSET" -OutFile $archive
+          }
+          if (!(Test-Path -LiteralPath $checksum)) {
+            Invoke-WebRequest "$env:FREECAD_URL/$env:FREECAD_ASSET-SHA256.txt" -OutFile $checksum
+          }
+          $expected = [regex]::Match((Get-Content -Raw -LiteralPath $checksum), '(?i)\b[a-f0-9]{64}\b').Value
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if (!$expected -or $actual -ne $expected) { throw "Official runtime checksum mismatch" }
+          $runtime = Join-Path $env:RUNNER_TEMP "contour-runtime"
+          & 7z x $archive "-o$runtime" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Runtime extraction failed" }
+          $executables = @(Get-ChildItem -LiteralPath $runtime -Recurse -File -Filter FreeCADCmd.exe |
+            Where-Object { $_.Directory.Name -eq "bin" })
+          if ($executables.Count -ne 1) { throw "Expected one native FreeCADCmd executable" }
+          "JIJEN_FREECAD_EXE=$($executables[0].FullName)" >> $env:GITHUB_ENV
+      - name: Save verified runtime archive
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: .ci-runtime-download
+          key: freecad-windows-1.1.4-py311-v1
+      - name: Run current source contour tests
+        run: |
+          ./.github/scripts/invoke_surface_contour_tests.ps1 -Executable $env:JIJEN_FREECAD_EXE -PartPath src/Mod/Part -LogPath contour-tests.log
+          "All contour tests passed on official FreeCAD 1.1.4 Windows. No compilation or installer packaging was needed." >> $env:GITHUB_STEP_SUMMARY
+      - name: Upload diagnostic test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: contour-tests-${{ github.run_id }}-${{ github.job }}
+          path: contour-tests.log
+          retention-days: 7
+          if-no-files-found: ignore

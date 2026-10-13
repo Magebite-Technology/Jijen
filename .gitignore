@@ -7,6 +7,7 @@
 !/.git-blame-ignore-revs
 !/.gitattributes
 !/.github/
+!/.github/**
 !/.gitignore
 !/.gitmodules
 !/.packit.yaml

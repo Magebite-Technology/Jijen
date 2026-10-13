@@ -350,7 +350,7 @@ class SemanticRegionContourFeature:
                 source,
                 detection,
                 reference_direction=obj.ReferenceDirection,
-                orientation_tolerance=obj.OrientationTolerance,
+                orientation_tolerance=obj.OrientationTolerance.Value,
                 sole_band=obj.SoleBand,
             )
             wanted = select_semantic_regions(semantic, obj.SurfaceRole)
@@ -367,6 +367,8 @@ class SemanticRegionContourFeature:
                 for result in extract_region_contours(source, detection)
             }
             contours = [contour_by_id[item.region_id] for item in selected if item.region_id in contour_by_id]
+            for result in contours:
+                diagnostics.extend(result.diagnostics)
             self._set_metadata(obj, selected, diagnostics)
             valid = [result for result in contours if result.status == "ok" and result.wires]
             wires = [wire for result in valid for wire in result.wires]

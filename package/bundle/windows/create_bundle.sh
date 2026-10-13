@@ -155,6 +155,14 @@ if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode --console "import pivy; from piv
   exit 1
 fi
 
+# Run contour tests on the staged app before compression and NSIS.
+if [[ "${JIJEN_VALIDATE_CONTOURS:-0}" == "1" ]]; then
+    pwsh -NoProfile -File ../../../.github/scripts/invoke_surface_contour_tests.ps1 \
+        -Executable "$SIGN_DIR/bin/freecadcmd.exe" \
+        -PartPath "$SIGN_DIR/Mod/Part" \
+        -LogPath ../../../beta-fixture-tests.log
+fi
+
 7z a -t7z -mx9 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
 # create hash
 sha256sum ${version_name}.7z > ${version_name}.7z-SHA256.txt
