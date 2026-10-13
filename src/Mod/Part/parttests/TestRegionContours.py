@@ -14,7 +14,9 @@ class TestRegionContours(unittest.TestCase):
         detection = regions.detect_surface_regions(fixture.shape)
         results = contours.extract_region_contours(fixture.shape, detection)
         self.assertEqual(len(results), 6)
-        for result, expected in zip(results, fixture.regions):
+        expected_by_faces = {frozenset(item.face_indices): item for item in fixture.regions}
+        for result in results:
+            expected = expected_by_faces[frozenset(result.face_indices)]
             self.assertEqual(result.status, "ok", result.diagnostics)
             self.assertEqual(len(result.wires), 1)
             self.assertTrue(result.wires[0].isClosed())
