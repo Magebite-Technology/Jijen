@@ -3,8 +3,13 @@ name: Jijen Windows Beta
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/surface-contours-phase-1
+    paths:
+      - .github/beta-build-request.txt
 
-# Python changes use the fast test workflow; request this beta explicitly.
+# Python changes use fast tests; change beta-build-request.txt for a full beta.
 
 permissions:
   contents: read

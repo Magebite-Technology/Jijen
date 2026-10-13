@@ -1,0 +1,3 @@
+Windows installer request: 2026-10-13
+Validated contour source: 7e008028b2190379df446357bbd601ff4a115836
+Change this file and commit on feature/surface-contours-phase-1 to request another full beta build.
