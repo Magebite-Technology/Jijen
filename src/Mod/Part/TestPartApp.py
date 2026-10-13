@@ -43,6 +43,14 @@ from parttests.TestLinkArrayPoint import TestLinkArrayPoint
 from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.TestFaceMakerUnifiedPlanar import *
 from parttests.TestFaceMakerUnifiedNonPlanar import *
+from parttests.TestSurfaceContourFixtures import TestSurfaceContourFixtures
+from parttests.TestSurfaceContours import TestSurfaceContours
+from parttests.TestSurfaceRegions import TestSurfaceRegions
+from parttests.TestRegionContours import TestRegionContours
+from parttests.TestSurfaceContourGui import TestSurfaceContourGui
+from parttests.TestSurfaceContourParametric import TestSurfaceContourParametric
+from parttests.TestSurfaceSemantics import TestSurfaceSemantics
+from parttests.TestSurfaceSemantics import TestSurfaceSemantics
 
 
 # ---------------------------------------------------------------------------

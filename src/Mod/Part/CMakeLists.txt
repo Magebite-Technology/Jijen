@@ -15,6 +15,10 @@ set(Part_Scripts
     Init.py
     JoinFeatures.py
     MakeBottle.py
+    SurfaceContours.py
+    SurfaceContourGui.py
+    SurfaceRegions.py
+    SurfaceSemantics.py
     PartEnums.py
     TestPartApp.py
 )
@@ -55,7 +59,6 @@ set(BOPTools_Scripts
     BOPTools/BOPFeatures.py
     BOPTools/GeneralFuseResult.py
     BOPTools/JoinAPI.py
-    BOPTools/JoinFeatures.py
     BOPTools/ShapeMerge.py
     BOPTools/SplitAPI.py
     BOPTools/SplitFeatures.py
@@ -76,6 +79,14 @@ set(Part_tests
     parttests/BRep_tests.py
     parttests/Geom2d_tests.py
     parttests/part_test_objects.py
+    parttests/surface_contour_fixtures.py
+    parttests/TestSurfaceContourFixtures.py
+    parttests/TestSurfaceContours.py
+    parttests/TestSurfaceRegions.py
+    parttests/TestRegionContours.py
+    parttests/TestSurfaceContourGui.py
+    parttests/TestSurfaceContourParametric.py
+    parttests/TestSurfaceSemantics.py
     parttests/regression_tests.py
     parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py
