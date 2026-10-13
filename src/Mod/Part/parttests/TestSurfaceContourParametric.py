@@ -21,12 +21,16 @@ class TestSurfaceContourParametric(unittest.TestCase):
 
     def test_factory_creates_linked_feature_with_metadata(self):
         source = self._source(fixtures.cube().shape)
-        preview = contours.create_parametric_region_contour(source, policy="individual")
+        preview = contours.create_parametric_region_contour(
+            source, region_ids=["Region1", "Region2"], policy="individual"
+        )
         self.assertEqual(preview.TypeId, "Part::FeaturePython")
         self.assertIs(preview.Source, source)
         self.assertEqual(preview.GroupingPolicy, "individual")
         self.assertEqual(preview.ContourStatus, "ok")
+        self.assertEqual(preview.RegionIds, ["Region1", "Region2"])
         self.assertEqual(preview.ResolvedRegionIds, list(preview.RegionIds))
+        self.assertEqual(len(preview.Shape.Wires), 2)
         self.assertTrue(preview.SourceFaceIndices)
         self.assertTrue(preview.Shape.Wires)
 

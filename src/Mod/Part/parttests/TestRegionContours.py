@@ -14,12 +14,20 @@ class TestRegionContours(unittest.TestCase):
         detection = regions.detect_surface_regions(fixture.shape)
         results = contours.extract_region_contours(fixture.shape, detection)
         self.assertEqual(len(results), 6)
-        for result in results:
+        for result, expected in zip(results, fixture.regions):
             self.assertEqual(result.status, "ok", result.diagnostics)
             self.assertEqual(len(result.wires), 1)
             self.assertTrue(result.wires[0].isClosed())
-            self.assertEqual(len(result.wires[0].Edges), 4)
+            # Removing internal edges retains two native segments per side.
+            self.assertEqual(len(result.wires[0].Edges), 8)
             self.assertAlmostEqual(result.wires[0].Length, 80)
+            oracle = expected.boundaries[0]
+            for edge in result.wires[0].Edges:
+                for point in edge.discretize(Number=5):
+                    self.assertLess(Part.Vertex(point).distToShape(oracle)[0], 1e-7)
+            for edge in oracle.Edges:
+                for point in edge.discretize(Number=5):
+                    self.assertLess(Part.Vertex(point).distToShape(result.wires[0])[0], 1e-7)
 
     def test_region_boundary_keeps_shared_vertices_until_assembly(self):
         shape = fixtures.cube().shape
