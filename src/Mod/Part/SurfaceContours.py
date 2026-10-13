@@ -37,7 +37,11 @@ def _resolve_shape(source):
     elif isinstance(source, App.DocumentObject):
         try:
             # The kernel composes object/link placement. Do not apply it again.
-            shape = Part.getShape(source, needSubElement=False, transform=True)
+            shape = getattr(source, "Shape", None)
+            if shape is None or shape.isNull():
+                shape = Part.getShape(
+                    source, needSubElement=False, transform=True
+                )
         except Exception as error:
             raise ContourInputError("unsupported_input", str(error)) from error
     else:
