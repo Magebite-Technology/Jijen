@@ -6,6 +6,9 @@ users choose a geometric grouping or a semantic role such as top, bottom, side,
 or sole candidate. Individual face picking is never required.
 """
 
+from contextlib import contextmanager
+import time
+
 import FreeCAD as App
 
 import SurfaceContours as contours
@@ -48,6 +51,10 @@ if App.GuiUp:
             self.semantic_detection = None
             self.results = ()
             self._building = False
+            self._busy = False
+            self._closing = False
+            self._cancelled = False
+            self._progress_dialog = None
 
             self.form = QtWidgets.QWidget()
             self.form.setWindowTitle("Surface contours")
@@ -137,7 +144,7 @@ if App.GuiUp:
             self.status_label.setWordWrap(True)
             layout.addWidget(self.status_label)
             self._update_semantic_controls()
-            self.refresh()
+            QtCore.QTimer.singleShot(0, self.refresh)
 
         def getStandardButtons(self):
             return int(QtGui.QDialogButtonBox.Close)
@@ -171,7 +178,86 @@ if App.GuiUp:
             colour = "#a33" if error else "#555"
             self.status_label.setStyleSheet("color: %s" % colour)
 
+        def _cancel(self):
+            self._cancelled = True
+            if self._progress_dialog is not None:
+                self._progress_dialog.setLabelText("Cancelling…")
+
+        def _progress(self, stage, completed=None, total=None):
+            if self._cancelled or self._closing:
+                raise contours.ContourCancelled()
+            now = time.monotonic()
+            if now - self._last_progress < 0.05:
+                return
+            self._last_progress = now
+            dialog = self._progress_dialog
+            if dialog is not None:
+                dialog.setLabelText(stage)
+                if total is not None and total > 0:
+                    dialog.setRange(0, total)
+                    dialog.setValue(completed or 0)
+                QtWidgets.QApplication.processEvents()
+                if dialog.wasCanceled() or self._cancelled or self._closing:
+                    raise contours.ContourCancelled()
+
+        @contextmanager
+        def _operation(self, title):
+            self._busy = True
+            self._cancelled = False
+            self._last_progress = 0.0
+            controls = (self.refresh_button, self.mode_combo, self.policy_combo,
+                        self.direction_combo, self.role_combo, self.region_list,
+                        self.create_button, self.create_all_button)
+            for control in controls:
+                control.setEnabled(False)
+            dialog = QtWidgets.QProgressDialog(title, "Cancel", 0, 0, Gui.getMainWindow())
+            dialog.setWindowTitle("Surface contours")
+            dialog.setWindowModality(QtCore.Qt.ApplicationModal)
+            dialog.setMinimumDuration(0)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.canceled.connect(self._cancel)
+            self._progress_dialog = dialog
+            dialog.show()
+            try:
+                with contours.contour_operation(self._progress):
+                    yield
+            finally:
+                self._progress_dialog = None
+                dialog.close()
+                dialog.deleteLater()
+                self._busy = False
+                for control in controls:
+                    control.setEnabled(True)
+                self._update_semantic_controls()
+                self.create_button.setEnabled(bool(self.results))
+                self.create_all_button.setEnabled(bool(self.results))
+                if self._closing:
+                    QtCore.QTimer.singleShot(0, Gui.Control.closeDialog)
+
         def refresh(self):
+            if self._busy or self._closing or not hasattr(self, "region_list"):
+                return
+            try:
+                with self._operation("Reading geometry…"):
+                    self._refresh()
+            except contours.ContourCancelled:
+                self.results = ()
+                self.detection = None
+                self.semantic_detection = None
+                self.region_list.clear()
+                self.create_button.setEnabled(False)
+                self.create_all_button.setEnabled(False)
+                self.detail_label.setText("No region selected.")
+                self._set_status("Cancelled. Refresh selection to try again.")
+            except Exception as error:
+                self.results = ()
+                self.region_list.clear()
+                self.create_button.setEnabled(False)
+                self.create_all_button.setEnabled(False)
+                self._set_status("Contour detection failed: %s" % error, error=True)
+
+        def _refresh(self):
             if not hasattr(self, "region_list"):
                 return
             self._building = True
@@ -193,21 +279,20 @@ if App.GuiUp:
 
                 self.source_edit.setText(self.source.Label)
                 try:
+                    snapshot = contours._resolve_shape(self.source).copy()
                     self.detection = regions.detect_surface_regions(
-                        self.source, policy=self._policy()
-                    )
-                    all_results = contours.extract_region_contours(
-                        self.source, self.detection
+                        snapshot, policy=self._policy()
                     )
                     if self._mode() == "semantic":
                         self.semantic_detection = semantics.classify_surface_regions(
-                            self.source,
+                            snapshot,
                             self.detection,
                             reference_direction=self._direction(),
                         )
                         semantic_regions = semantics.select_semantic_regions(
                             self.semantic_detection, self._role()
                         )
+                        all_results = contours.extract_region_contours(snapshot, semantic_regions)
                         by_id = {result.region_id: result for result in all_results}
                         self.results = tuple(
                             by_id[item.region_id]
@@ -218,15 +303,18 @@ if App.GuiUp:
                             item.region_id: item for item in semantic_regions
                         }
                     else:
-                        self.results = tuple(all_results)
+                        self.results = contours.extract_region_contours(snapshot, self.detection)
                         semantic_by_id = {}
+                except contours.ContourCancelled:
+                    raise
                 except Exception as error:
                     self._set_status("Contour detection failed: %s" % error, error=True)
                     self.create_button.setEnabled(False)
                     self.create_all_button.setEnabled(False)
                     return
 
-                for result in self.results:
+                for ordinal, result in enumerate(self.results):
+                    contours._checkpoint("Loading region list", ordinal, len(self.results))
                     if self._mode() == "semantic":
                         item_data = semantic_by_id[result.region_id]
                         label = (
@@ -303,6 +391,16 @@ if App.GuiUp:
                 )
 
         def _create(self, selected):
+            if self._busy or self._closing:
+                return ()
+            try:
+                with self._operation("Creating preview…"):
+                    return self._create_result(selected)
+            except contours.ContourCancelled:
+                self._set_status("Preview cancelled. No preview was created.")
+                return ()
+
+        def _create_result(self, selected):
             if self.source is None:
                 self._set_status("Select exactly one object before creating a preview.", error=True)
                 return ()
@@ -325,6 +423,8 @@ if App.GuiUp:
                             policy=self._policy(),
                         ),
                     )
+            except contours.ContourCancelled:
+                raise
             except Exception as error:
                 self._set_status("Preview creation failed: %s" % error, error=True)
                 return ()
@@ -358,6 +458,10 @@ if App.GuiUp:
             self.create_selected()
 
         def reject(self):
+            self._closing = True
+            if self._busy:
+                self._cancel()
+                return
             Gui.Control.closeDialog()
 
 

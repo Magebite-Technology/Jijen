@@ -9,6 +9,71 @@ from parttests import surface_contour_fixtures as fixtures
 
 
 class TestSurfaceContours(unittest.TestCase):
+    def test_cancel_detection_restores_progress_scope(self):
+        import SurfaceRegions
+        calls = []
+
+        def cancel(stage, completed, total):
+            calls.append(stage)
+            if len(calls) == 20:
+                raise contours.ContourCancelled()
+
+        shape = fixtures.cube(True).shape
+        before = shape.exportBrepToString()
+        with self.assertRaises(contours.ContourCancelled):
+            with contours.contour_operation(cancel):
+                SurfaceRegions.detect_surface_regions(shape)
+        self.assertEqual(len(calls), 20)
+        self.assertEqual(shape.exportBrepToString(), before)
+        self.assertEqual(len(SurfaceRegions.detect_surface_regions(shape).regions), 6)
+        self.assertEqual(len(calls), 20)
+
+    def test_cancel_extraction_and_classification_is_not_geometry_error(self):
+        import SurfaceSemantics
+
+        import SurfaceRegions
+        shape = fixtures.cube(True).shape
+        detection = SurfaceRegions.detect_surface_regions(shape)
+        for operation in (contours.extract_region_contours,
+                          SurfaceSemantics.classify_surface_regions):
+            calls = []
+
+            def cancel(stage, completed, total):
+                calls.append(stage)
+                if len(calls) == 30:
+                    raise contours.ContourCancelled()
+
+            with self.subTest(operation=operation.__name__):
+                with self.assertRaises(contours.ContourCancelled):
+                    with contours.contour_operation(cancel):
+                        operation(shape, detection)
+                self.assertEqual(len(calls), 30)
+
+    def test_cancel_preview_rolls_back_document_transaction(self):
+        import SurfaceSemantics
+
+        doc = App.newDocument("ContourCancellation")
+        try:
+            source = doc.addObject("Part::Feature", "Source")
+            source.Shape = fixtures.cube().shape
+            doc.recompute()
+
+            def cancel(stage, completed, total):
+                if stage == "Finishing preview":
+                    raise contours.ContourCancelled()
+
+            for factory in (contours.create_parametric_region_contour,
+                            SurfaceSemantics.create_semantic_region_contour):
+                with self.subTest(factory=factory.__name__):
+                    with self.assertRaises(contours.ContourCancelled):
+                        with contours.contour_operation(cancel):
+                            factory(source)
+                    self.assertEqual([obj.Name for obj in doc.Objects], [source.Name])
+            preview = contours.create_parametric_region_contour(source)
+            self.assertEqual(preview.ContourStatus, "ok", preview.LastError)
+        finally:
+            App.closeDocument(doc.Name)
+
     def assertLoops(self, shape, counts):
         results = contours.extract_face_contours(shape)
         self.assertEqual(len(results), len(counts))
