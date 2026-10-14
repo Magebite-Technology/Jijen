@@ -6,9 +6,39 @@ parameterisation cut, not a physical boundary. Region grouping is Phase 3.
 """
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import FreeCAD as App
 import Part
+
+
+class ContourCancelled(Exception):
+    """An interactive contour operation was cancelled at a safe checkpoint."""
+
+
+_progress_callback = ContextVar("surface_contour_progress", default=None)
+
+
+@contextmanager
+def contour_operation(callback):
+    """Scope progress/cancellation to one operation; restore even on failure.
+
+    Core geometry remains GUI-independent. Callbacks may raise ContourCancelled.
+    Interactive callers must prevent document edits while pumping GUI events.
+    """
+    token = _progress_callback.set(callback)
+    try:
+        _checkpoint("Reading geometry")
+        yield
+    finally:
+        _progress_callback.reset(token)
+
+
+def _checkpoint(stage, completed=None, total=None):
+    callback = _progress_callback.get()
+    if callback is not None:
+        callback(stage, completed, total)
 
 
 class ContourInputError(ValueError):
@@ -42,6 +72,8 @@ def _resolve_shape(source):
                 shape = Part.getShape(
                     source, needSubElement=False, transform=True
                 )
+        except ContourCancelled:
+            raise
         except Exception as error:
             raise ContourInputError("unsupported_input", str(error)) from error
     else:
@@ -59,17 +91,17 @@ def _assemble_wires(edges):
     Geometrically coincident but distinct vertices are never merged. Closed
     single-edge curves contribute two incidences to the same vertex.
     """
-    vertices, ends, adjacency = [], [], []
+    vertex_index = _NativeShapeIndex()
+    ends, adjacency = [], []
 
     def vertex_id(vertex):
-        for i, existing in enumerate(vertices):
-            if vertex.isSame(existing):
-                return i
-        vertices.append(vertex)
-        adjacency.append([])
-        return len(vertices) - 1
+        index = vertex_index.add(vertex)
+        if index == len(adjacency):
+            adjacency.append([])
+        return index
 
     for i, edge in enumerate(edges):
+        _checkpoint("Extracting contours")
         first, last = edge.firstVertex(True), edge.lastVertex(True)
         if first.isNull() or last.isNull():
             return (), "invalid_geometry", ("Boundary edge has no endpoint topology",)
@@ -83,14 +115,18 @@ def _assemble_wires(edges):
     unused = set(range(len(edges)))
     wires = []
     while unused:
+        _checkpoint("Extracting contours")
         # Prefer an open endpoint so a broken chain is returned in full.
         seed = min(unused)
         component = {seed}
         pending = [seed]
         while pending:
+            _checkpoint("Extracting contours")
             current = pending.pop()
             for vertex in ends[current]:
+                _checkpoint("Extracting contours")
                 for neighbour in adjacency[vertex]:
+                    _checkpoint("Extracting contours")
                     if neighbour in unused and neighbour not in component:
                         component.add(neighbour)
                         pending.append(neighbour)
@@ -99,6 +135,7 @@ def _assemble_wires(edges):
         )
         current, ordered = start, []
         while True:
+            _checkpoint("Extracting contours")
             following = next((i for i in adjacency[current] if i in unused), None)
             if following is None:
                 break
@@ -128,7 +165,9 @@ def _extract_face(face, index):
             return FaceContour(index, "invalid_geometry", diagnostics=("Invalid source face",))
         edges = []
         for wire in face.Wires:
+            _checkpoint("Extracting contours")
             for edge in wire.OrderedEdges:
+                _checkpoint("Extracting contours")
                 if edge.Degenerated or edge.isSeam(face):
                     continue
                 if any(edge.isSame(existing) for existing in edges):
@@ -142,6 +181,8 @@ def _extract_face(face, index):
             return FaceContour(index, "no_boundary")
         wires, status, diagnostics = _assemble_wires(edges)
         return FaceContour(index, status, wires, diagnostics)
+    except ContourCancelled:
+        raise
     except Exception as error:
         return FaceContour(index, "invalid_geometry", diagnostics=(str(error),))
 
@@ -182,6 +223,7 @@ def create_contour_preview(source, face_indices=None, document=None):
     document.openTransaction("Preview individual face contours")
     try:
         for result in pending:
+            _checkpoint("Extracting contours")
             obj = document.addObject("Part::Feature", "FaceContour")
             obj.Label = result.face_name + " contour"
             obj.Shape = Part.makeCompound(list(result.wires))
@@ -197,6 +239,7 @@ def create_contour_preview(source, face_indices=None, document=None):
                 obj.ViewObject.LineWidth = 3.0
             created.append(obj)
         document.recompute()
+        _checkpoint("Finishing preview")
         document.commitTransaction()
     except Exception:
         document.abortTransaction()
@@ -226,6 +269,7 @@ class _NativeShapeIndex:
     def add(self, shape):
         bucket = self.buckets.setdefault(shape.hashCode(), [])
         for index in bucket:
+            _checkpoint("Extracting contours")
             if shape.isSame(self.shapes[index]):
                 return index
         index = len(self.shapes)
@@ -245,6 +289,7 @@ def _normalise_region_groups(regions, face_count):
     normalised = []
     claimed = set()
     for ordinal, region in enumerate(regions, 1):
+        _checkpoint("Extracting contours")
         indices = getattr(region, "face_indices", region)
         try:
             indices = tuple(sorted(set(indices)))
@@ -270,33 +315,42 @@ def _normalise_region_groups(regions, face_count):
     return tuple(normalised)
 
 
-def _extract_region_boundary(shape, face_indices):
+def _extract_region_boundary(shape, face_indices, faces=None):
+    if faces is None:
+        faces = shape.Faces
     edge_index = _NativeShapeIndex()
     occurrences = []
     diagnostics = set()
     try:
         for face_index in face_indices:
-            face = shape.Faces[face_index]
+            _checkpoint("Extracting contours")
+            face = faces[face_index]
             if not face.isValid():
                 return (), "invalid_geometry", ("Invalid source face",)
             for wire in face.Wires:
+                _checkpoint("Extracting contours")
                 for edge in wire.OrderedEdges:
+                    _checkpoint("Extracting contours")
                     if edge.Degenerated or edge.isSeam(face):
                         continue
                     edge_id = edge_index.add(edge)
                     # Keep shared native vertices until boundary assembly.
                     # Independently copying edges disconnects closed loops.
                     occurrences.append((edge_id, edge, face_index))
+    except ContourCancelled:
+        raise
     except Exception as error:
         return (), "invalid_geometry", (str(error),)
 
     grouped = {}
     for edge_id, edge, face_index in occurrences:
+        _checkpoint("Extracting contours")
         grouped.setdefault(edge_id, []).append((edge, face_index))
 
     boundary_edges = []
     non_manifold = False
     for edge_id in sorted(grouped):
+        _checkpoint("Extracting contours")
         members = grouped[edge_id]
         if len(members) == 1:
             boundary_edges.append(members[0][0])
@@ -332,10 +386,12 @@ def extract_region_contours(source, regions=None):
         from SurfaceRegions import detect_surface_regions
 
         regions = detect_surface_regions(shape)
-    groups = _normalise_region_groups(regions, len(shape.Faces))
+    faces = shape.Faces
+    groups = _normalise_region_groups(regions, len(faces))
     contours = []
-    for region_id, component_id, face_indices, input_status, input_diagnostics in groups:
-        wires, extracted_status, extracted_diagnostics = _extract_region_boundary(shape, face_indices)
+    for ordinal, (region_id, component_id, face_indices, input_status, input_diagnostics) in enumerate(groups):
+        _checkpoint("Extracting contours", ordinal, len(groups))
+        wires, extracted_status, extracted_diagnostics = _extract_region_boundary(shape, face_indices, faces)
         diagnostics = tuple(sorted(set(input_diagnostics).union(extracted_diagnostics)))
         status = input_status if input_status != "ok" else extracted_status
         contours.append(
@@ -379,6 +435,7 @@ def create_region_contour_preview(source, region_contours, document=None):
     _resolve_shape(source)
     seen = set()
     for result in pending:
+        _checkpoint("Extracting contours")
         region_id = getattr(result, "region_id", None)
         if not region_id or region_id in seen:
             raise ValueError("Region contour IDs must be present and unique")
@@ -394,6 +451,7 @@ def create_region_contour_preview(source, region_contours, document=None):
     document.openTransaction("Preview surface region contours")
     try:
         for result in valid:
+            _checkpoint("Extracting contours")
             obj = document.addObject("Part::Feature", "RegionContour")
             obj.Label = "%s contour" % result.region_id
             obj.Shape = Part.makeCompound(list(result.wires))
@@ -415,6 +473,7 @@ def create_region_contour_preview(source, region_contours, document=None):
                 obj.ViewObject.LineWidth = 3.0
             created.append(obj)
         document.recompute()
+        _checkpoint("Finishing preview")
         document.commitTransaction()
     except Exception:
         document.abortTransaction()
@@ -473,6 +532,7 @@ class RegionContourFeature:
         )
         messages = set(diagnostics)
         for result in selected:
+            _checkpoint("Extracting contours")
             messages.update(result.diagnostics)
         obj.Diagnostics = "; ".join(sorted(messages))
 
@@ -494,8 +554,10 @@ class RegionContourFeature:
             detection = detect_surface_regions(
                 source, policy=getattr(obj, "GroupingPolicy", "coplanar")
             )
-            results = extract_region_contours(source, detection)
             requested = set(getattr(obj, "RegionIds", ()))
+            chosen = [region for region in detection.regions
+                      if not requested or region.region_id in requested]
+            results = extract_region_contours(source, chosen)
             selected = (
                 [result for result in results if result.region_id in requested]
                 if requested
@@ -521,6 +583,8 @@ class RegionContourFeature:
                 obj.ContourStatus = "ok"
             else:
                 obj.ContourStatus = "partial"
+        except ContourCancelled:
+            raise
         except Exception as error:
             obj.Shape = Part.Shape()
             obj.ResolvedRegionIds = []
@@ -556,9 +620,11 @@ def create_parametric_region_contour(
     if len(set(requested)) != len(requested):
         raise ValueError("Region IDs must be unique")
 
+    created_name = None
     document.openTransaction("Create parametric surface contour")
     try:
         obj = document.addObject("Part::FeaturePython", "RegionContourParametric")
+        created_name = obj.Name
         obj.Label = "Surface contours (%s)" % source.Label
         RegionContourFeature(obj)
         obj.Source = source
@@ -568,8 +634,11 @@ def create_parametric_region_contour(
             obj.ViewObject.LineColor = (0.1, 0.55, 1.0)
             obj.ViewObject.LineWidth = 3.0
         document.recompute()
+        _checkpoint("Finishing preview")
         document.commitTransaction()
     except Exception:
         document.abortTransaction()
+        if created_name and document.getObject(created_name) is not None:
+            document.removeObject(created_name)
         raise
     return obj

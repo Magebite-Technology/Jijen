@@ -15,7 +15,7 @@ MODULES = (
     "TestRegionContours", "TestSurfaceContourGui", "TestSurfaceContourParametric",
     "TestSurfaceSemantics",
 )
-EXPECTED_TESTS = 69
+EXPECTED_TESTS = 72
 
 
 class DiagnosticResult(unittest.TextTestResult):

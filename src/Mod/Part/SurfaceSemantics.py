@@ -13,7 +13,9 @@ import math
 import FreeCAD as App
 import Part
 
-from SurfaceContours import _resolve_shape, extract_region_contours
+from SurfaceContours import (
+    _resolve_shape, extract_region_contours, _checkpoint, ContourCancelled
+)
 
 
 _ROLES = ("all", "top", "bottom", "side", "sole_candidate", "unknown")
@@ -104,6 +106,7 @@ def _face_normal(face):
         total = App.Vector(0, 0, 0)
         count = 0
         for u_fraction, v_fraction in samples:
+            _checkpoint("Classifying surfaces")
             normal = face.normalAt(
                 u0 + (u1 - u0) * u_fraction,
                 v0 + (v1 - v0) * v_fraction,
@@ -115,6 +118,8 @@ def _face_normal(face):
         if count and total.Length > 1e-12:
             total.normalize()
             return total, ()
+    except ContourCancelled:
+        raise
     except Exception as error:
         return None, ("Normal sampling failed: %s" % error,)
     return None, ("Face has no usable oriented normal",)
@@ -136,20 +141,25 @@ def _shape_projection_bounds(shape, direction):
     return min(projections), max(projections)
 
 
-def _region_measure(shape, region):
+def _region_measure(shape, region, faces=None):
+    if faces is None:
+        faces = shape.Faces
     total_area = 0.0
     weighted_center = App.Vector(0, 0, 0)
     normals = []
     surface_types = set()
     diagnostics = set(region.diagnostics)
     for face_index in region.face_indices:
-        face = shape.Faces[face_index]
+        _checkpoint("Classifying surfaces")
+        face = faces[face_index]
         try:
             area = max(float(face.Area), 0.0)
             center = face.CenterOfMass
             total_area += area
             weighted_center += center * area
             surface_types.add(type(face.Surface).__name__)
+        except ContourCancelled:
+            raise
         except Exception as error:
             diagnostics.add("Face measurement failed: %s" % error)
         normal, normal_diagnostics = _face_normal(face)
@@ -159,10 +169,11 @@ def _region_measure(shape, region):
     if total_area > 1e-12:
         center = weighted_center * (1.0 / total_area)
     else:
-        center = shape.Faces[region.face_indices[0]].CenterOfMass
+        center = faces[region.face_indices[0]].CenterOfMass
     if normals:
         normal_sum = App.Vector(0, 0, 0)
         for normal, weight in normals:
+            _checkpoint("Classifying surfaces")
             normal_sum += normal * weight
         average_normal = normal_sum
         if average_normal.Length > 1e-12:
@@ -214,10 +225,12 @@ def classify_surface_regions(
     span = high - low
     if span <= 1e-12:
         span = 1.0
+    faces = shape.Faces
     classified = []
     diagnostics = set()
     for region in regions.regions:
-        area, center, average_normal, surface_types, region_diagnostics = _region_measure(shape, region)
+        _checkpoint("Classifying surfaces")
+        area, center, average_normal, surface_types, region_diagnostics = _region_measure(shape, region, faces)
         score = 0.0 if average_normal is None else average_normal.dot(settings.reference_direction)
         elevation = max(0.0, min(1.0, (center.dot(settings.reference_direction) - low) / span))
         primary = _orientation_role(score, settings.orientation_tolerance)
@@ -318,6 +331,7 @@ class SemanticRegionContourFeature:
         self._ensure(obj, "App::PropertyString", "Diagnostics")
         self._ensure(obj, "App::PropertyString", "LastError")
         for name in ("ResolvedRegionIds", "SourceFaceIndices", "SemanticRoles", "ContourStatus", "Diagnostics", "LastError"):
+            _checkpoint("Classifying surfaces")
             try:
                 obj.setEditorMode(name, 1)
             except Exception:
@@ -364,10 +378,11 @@ class SemanticRegionContourFeature:
             )
             contour_by_id = {
                 result.region_id: result
-                for result in extract_region_contours(source, detection)
+                for result in extract_region_contours(source, selected)
             }
             contours = [contour_by_id[item.region_id] for item in selected if item.region_id in contour_by_id]
             for result in contours:
+                _checkpoint("Classifying surfaces")
                 diagnostics.extend(result.diagnostics)
             self._set_metadata(obj, selected, diagnostics)
             valid = [result for result in contours if result.status == "ok" and result.wires]
@@ -381,6 +396,8 @@ class SemanticRegionContourFeature:
                 obj.ContourStatus = "ok"
             else:
                 obj.ContourStatus = "partial"
+        except ContourCancelled:
+            raise
         except Exception as error:
             self._clear(obj, "error")
             obj.LastError = str(error)
@@ -392,6 +409,7 @@ class SemanticRegionContourFeature:
         obj.SemanticRoles = [_role_summary(item) for item in selected]
         messages = set(diagnostics)
         for item in selected:
+            _checkpoint("Classifying surfaces")
             messages.update(item.diagnostics)
         obj.Diagnostics = "; ".join(sorted(messages))
 
@@ -432,9 +450,11 @@ def create_semantic_region_contour(
         raise ValueError("Region IDs must be non-empty strings")
     if len(set(requested)) != len(requested):
         raise ValueError("Region IDs must be unique")
+    created_name = None
     document.openTransaction("Create semantic surface contour")
     try:
         obj = document.addObject("Part::FeaturePython", "SemanticRegionContour")
+        created_name = obj.Name
         obj.Label = "%s contours (%s)" % (role.replace("_", " "), source.Label)
         SemanticRegionContourFeature(obj)
         obj.Source = source
@@ -448,8 +468,11 @@ def create_semantic_region_contour(
             obj.ViewObject.LineColor = (0.95, 0.55, 0.1)
             obj.ViewObject.LineWidth = 3.0
         document.recompute()
+        _checkpoint("Finishing preview")
         document.commitTransaction()
     except Exception:
         document.abortTransaction()
+        if created_name and document.getObject(created_name) is not None:
+            document.removeObject(created_name)
         raise
     return obj
