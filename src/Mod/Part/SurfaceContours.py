@@ -91,16 +91,14 @@ def _assemble_wires(edges):
     Geometrically coincident but distinct vertices are never merged. Closed
     single-edge curves contribute two incidences to the same vertex.
     """
-    vertices, ends, adjacency = [], [], []
+    vertex_index = _NativeShapeIndex()
+    ends, adjacency = [], []
 
     def vertex_id(vertex):
-        for i, existing in enumerate(vertices):
-            _checkpoint("Extracting contours")
-            if vertex.isSame(existing):
-                return i
-        vertices.append(vertex)
-        adjacency.append([])
-        return len(vertices) - 1
+        index = vertex_index.add(vertex)
+        if index == len(adjacency):
+            adjacency.append([])
+        return index
 
     for i, edge in enumerate(edges):
         _checkpoint("Extracting contours")
@@ -317,14 +315,16 @@ def _normalise_region_groups(regions, face_count):
     return tuple(normalised)
 
 
-def _extract_region_boundary(shape, face_indices):
+def _extract_region_boundary(shape, face_indices, faces=None):
+    if faces is None:
+        faces = shape.Faces
     edge_index = _NativeShapeIndex()
     occurrences = []
     diagnostics = set()
     try:
         for face_index in face_indices:
             _checkpoint("Extracting contours")
-            face = shape.Faces[face_index]
+            face = faces[face_index]
             if not face.isValid():
                 return (), "invalid_geometry", ("Invalid source face",)
             for wire in face.Wires:
@@ -386,11 +386,12 @@ def extract_region_contours(source, regions=None):
         from SurfaceRegions import detect_surface_regions
 
         regions = detect_surface_regions(shape)
-    groups = _normalise_region_groups(regions, len(shape.Faces))
+    faces = shape.Faces
+    groups = _normalise_region_groups(regions, len(faces))
     contours = []
     for ordinal, (region_id, component_id, face_indices, input_status, input_diagnostics) in enumerate(groups):
         _checkpoint("Extracting contours", ordinal, len(groups))
-        wires, extracted_status, extracted_diagnostics = _extract_region_boundary(shape, face_indices)
+        wires, extracted_status, extracted_diagnostics = _extract_region_boundary(shape, face_indices, faces)
         diagnostics = tuple(sorted(set(input_diagnostics).union(extracted_diagnostics)))
         status = input_status if input_status != "ok" else extracted_status
         contours.append(

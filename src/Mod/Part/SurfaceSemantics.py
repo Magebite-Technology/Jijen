@@ -141,7 +141,9 @@ def _shape_projection_bounds(shape, direction):
     return min(projections), max(projections)
 
 
-def _region_measure(shape, region):
+def _region_measure(shape, region, faces=None):
+    if faces is None:
+        faces = shape.Faces
     total_area = 0.0
     weighted_center = App.Vector(0, 0, 0)
     normals = []
@@ -149,7 +151,7 @@ def _region_measure(shape, region):
     diagnostics = set(region.diagnostics)
     for face_index in region.face_indices:
         _checkpoint("Classifying surfaces")
-        face = shape.Faces[face_index]
+        face = faces[face_index]
         try:
             area = max(float(face.Area), 0.0)
             center = face.CenterOfMass
@@ -167,7 +169,7 @@ def _region_measure(shape, region):
     if total_area > 1e-12:
         center = weighted_center * (1.0 / total_area)
     else:
-        center = shape.Faces[region.face_indices[0]].CenterOfMass
+        center = faces[region.face_indices[0]].CenterOfMass
     if normals:
         normal_sum = App.Vector(0, 0, 0)
         for normal, weight in normals:
@@ -223,11 +225,12 @@ def classify_surface_regions(
     span = high - low
     if span <= 1e-12:
         span = 1.0
+    faces = shape.Faces
     classified = []
     diagnostics = set()
     for region in regions.regions:
         _checkpoint("Classifying surfaces")
-        area, center, average_normal, surface_types, region_diagnostics = _region_measure(shape, region)
+        area, center, average_normal, surface_types, region_diagnostics = _region_measure(shape, region, faces)
         score = 0.0 if average_normal is None else average_normal.dot(settings.reference_direction)
         elevation = max(0.0, min(1.0, (center.dot(settings.reference_direction) - low) / span))
         primary = _orientation_role(score, settings.orientation_tolerance)
