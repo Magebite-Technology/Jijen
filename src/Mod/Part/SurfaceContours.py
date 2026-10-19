@@ -44,7 +44,9 @@ def shape_revision(source):
     Any BRep change invalidates an explicit selection. False invalidation is
     preferable to following the wrong surface. Empty selections track all.
     """
-    brep = resolve_shape(source).exportBrepToString()
+    # Display triangulation is a cache, not a geometry edit. Clean an isolated
+    # copy so a redraw or save/reopen cannot invalidate a surface selection.
+    brep = resolve_shape(source).cleaned().exportBrepToString()
     return hashlib.sha256(brep.encode("utf-8")).hexdigest()
 
 
