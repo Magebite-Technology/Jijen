@@ -18,7 +18,8 @@ permissions:
 
 concurrency:
   group: jijen-windows-beta-${{ github.ref }}
-  cancel-in-progress: true
+  # Preserve expensive builds and let them finish saving their cache.
+  cancel-in-progress: false
 
 jobs:
   contour-tests:
@@ -36,7 +37,9 @@ jobs:
       MAKE_INSTALLER: "true"
       JIJEN_VALIDATE_CONTOURS: "1"
       CCACHE_DIR: D:/jijen-ccache
-      CCACHE_MAXSIZE: 2G
+      CCACHE_MAXSIZE: 5G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_BASEDIR: ${{ github.workspace }}
       UPLOAD_RELEASE: "false"
       SOURCE_SHA: ${{ github.sha }}
       SOURCE_BRANCH: ${{ github.ref_name }}
@@ -68,21 +71,42 @@ jobs:
           locked: true
 
       - name: Restore compiler cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: compiler-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: D:/jijen-ccache
-          key: windows-ccache-${{ hashFiles('pixi.lock', 'CMakePresets.json') }}-${{ github.sha }}
+          key: windows-2022-${{ runner.arch }}-ccache-v2-${{ hashFiles('pixi.lock', 'CMakePresets.json', 'package/bundle/build.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            windows-ccache-${{ hashFiles('pixi.lock', 'CMakePresets.json') }}-
+            windows-2022-${{ runner.arch }}-ccache-v2-${{ hashFiles('pixi.lock', 'CMakePresets.json', 'package/bundle/build.sh') }}-
 
       - name: Compile and install Jijen
+        id: compile
         shell: bash
         run: |
           set -euo pipefail
           python3 package/scripts/write_version_info.py ../freecad_version.txt
           export CMAKE_ARGS="${CMAKE_ARGS:-} -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+          pixi run --locked ccache --show-config
+          pixi run --locked ccache --zero-stats
+          trap 'pixi run --locked ccache --show-stats --verbose | tee compiler-cache-stats.log' EXIT
           pixi run --locked bash package/bundle/build.sh
-          pixi run --locked ccache --show-stats
+
+      - name: Save compiler cache after successful compilation
+        if: ${{ success() && steps.compile.outcome == 'success' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: D:/jijen-ccache
+          key: windows-2022-${{ runner.arch }}-ccache-v2-${{ hashFiles('pixi.lock', 'CMakePresets.json', 'package/bundle/build.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Report compiler cache statistics
+        if: ${{ always() && steps.compile.outcome != 'skipped' }}
+        run: |
+          if (Test-Path -LiteralPath compiler-cache-stats.log) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '## Compiler cache statistics'
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '```text'
+            Get-Content -LiteralPath compiler-cache-stats.log | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '```'
+          }
 
       - name: Validate installed contour tests before packaging
         run: |
@@ -120,6 +144,7 @@ jobs:
         with:
           name: windows-beta-test-log-${{ github.run_id }}
           path: |
+            compiler-cache-stats.log
             installed-contour-tests.log
             beta-fixture-tests.log
           if-no-files-found: ignore
