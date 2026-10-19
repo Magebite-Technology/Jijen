@@ -56,6 +56,10 @@ jobs:
         run: |
           $requested = $env:GITHUB_EVENT_NAME -eq 'workflow_dispatch'
           if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:BEFORE_SHA -match '^[0-9a-f]{40}$' -and $env:BEFORE_SHA -notmatch '^0+$') {
+            # A push may contain more than two commits. Fetch its exact old tip
+            # rather than assuming it is present in the shallow checkout.
+            git fetch --no-tags --depth=1 origin $env:BEFORE_SHA
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the previous push tip' }
             $changed = @(git diff --name-only $env:BEFORE_SHA $env:GITHUB_SHA -- .github/fast-contour-beta-request.json)
             if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect package request' }
             $requested = $changed -contains '.github/fast-contour-beta-request.json'
