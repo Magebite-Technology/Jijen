@@ -1,5 +1,5 @@
 {
   "base_run_id": "38370082593",
   "base_sha256": "46349b04e5b64ad8c4f1d5429a73f52aad40c921962ebc68aab19c684cc7c295",
-  "request": "First fast beta: overlay progress and cancellation modules onto validated Windows beta 16"
+  "request": "Hardened contour beta: revision safety, isolated cancellation and timeout validation"
 }
