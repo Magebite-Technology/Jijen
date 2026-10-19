@@ -212,12 +212,12 @@ if App.GuiUp:
             direction_row = QtWidgets.QHBoxLayout()
             direction_row.addWidget(QtWidgets.QLabel(_tr("Reference direction:")))
             self.direction_combo = QtWidgets.QComboBox()
-            self.direction_combo.addItem("+Z / top", App.Vector(0, 0, 1))
-            self.direction_combo.addItem("-Z / bottom", App.Vector(0, 0, -1))
-            self.direction_combo.addItem("+X / right", App.Vector(1, 0, 0))
-            self.direction_combo.addItem("-X / left", App.Vector(-1, 0, 0))
-            self.direction_combo.addItem("+Y / front", App.Vector(0, 1, 0))
-            self.direction_combo.addItem("-Y / back", App.Vector(0, -1, 0))
+            self.direction_combo.addItem(_tr("+Z / top"), App.Vector(0, 0, 1))
+            self.direction_combo.addItem(_tr("-Z / bottom"), App.Vector(0, 0, -1))
+            self.direction_combo.addItem(_tr("+X / right"), App.Vector(1, 0, 0))
+            self.direction_combo.addItem(_tr("-X / left"), App.Vector(-1, 0, 0))
+            self.direction_combo.addItem(_tr("+Y / front"), App.Vector(0, 1, 0))
+            self.direction_combo.addItem(_tr("-Y / back"), App.Vector(0, -1, 0))
             self.direction_combo.currentIndexChanged.connect(self.refresh)
             direction_row.addWidget(self.direction_combo, 1)
             layout.addLayout(direction_row)
@@ -225,12 +225,12 @@ if App.GuiUp:
             role_row = QtWidgets.QHBoxLayout()
             role_row.addWidget(QtWidgets.QLabel(_tr("Surface role:")))
             self.role_combo = QtWidgets.QComboBox()
-            self.role_combo.addItem("All semantic regions", "all")
-            self.role_combo.addItem("Top-facing", "top")
-            self.role_combo.addItem("Bottom-facing", "bottom")
-            self.role_combo.addItem("Side", "side")
-            self.role_combo.addItem("Sole candidate", "sole_candidate")
-            self.role_combo.addItem("Unknown / ambiguous", "unknown")
+            self.role_combo.addItem(_tr("All semantic regions"), "all")
+            self.role_combo.addItem(_tr("Top-facing"), "top")
+            self.role_combo.addItem(_tr("Bottom-facing"), "bottom")
+            self.role_combo.addItem(_tr("Side"), "side")
+            self.role_combo.addItem(_tr("Sole candidate"), "sole_candidate")
+            self.role_combo.addItem(_tr("Unknown / ambiguous"), "unknown")
             self.role_combo.currentIndexChanged.connect(self.refresh)
             role_row.addWidget(self.role_combo, 1)
             layout.addLayout(role_row)
@@ -288,7 +288,7 @@ if App.GuiUp:
 
         def _set_status(self, text, error=False):
             # Use the platform palette; error meaning must not depend on colour.
-            self.status_label.setText(_tr("Error: %s") % text if error else text)
+            self.status_label.setText(_tr("Error: %s") % _tr(text) if error else _tr(text))
             self.status_label.setAccessibleName(_tr("Contour status"))
 
         def _cancel(self):
@@ -357,7 +357,14 @@ if App.GuiUp:
                 timer.timeout.connect(timeout)
                 timer.start(WORKER_TIMEOUT_MS)
                 try:
-                    process.start(str(executable), ["--safe-mode", "--console", code])
+                    def start_worker():
+                        if timed_out[0] or self._cancelled or self._closing:
+                            loop.quit()
+                        else:
+                            process.start(str(executable), ["--safe-mode", "--console", code])
+                    # Deliver even synchronous start failures while the nested
+                    # event loop is active, otherwise quit() can be lost.
+                    QtCore.QTimer.singleShot(0, start_worker)
                     loop.exec_()
                     if self._cancelled or self._closing:
                         raise contours.ContourCancelled()
@@ -447,7 +454,7 @@ if App.GuiUp:
                 self.region_list.clear()
                 self.create_button.setEnabled(False)
                 self.create_all_button.setEnabled(False)
-                self._set_status("Contour detection failed: %s" % error, error=True)
+                self._set_status(_tr("Contour detection failed: %s") % error, error=True)
 
         def _refresh(self):
             if not hasattr(self, "region_list"):
@@ -483,7 +490,7 @@ if App.GuiUp:
                 except contours.ContourCancelled:
                     raise
                 except Exception as error:
-                    self._set_status("Contour detection failed: %s" % error, error=True)
+                    self._set_status(_tr("Contour detection failed: %s") % error, error=True)
                     self.create_button.setEnabled(False)
                     self.create_all_button.setEnabled(False)
                     return
@@ -608,7 +615,7 @@ if App.GuiUp:
             except contours.ContourCancelled:
                 raise
             except Exception as error:
-                self._set_status("Preview creation failed: %s" % error, error=True)
+                self._set_status(_tr("Preview creation failed: %s") % error, error=True)
                 return ()
             Gui.Selection.clearSelection()
             for obj in created:
@@ -650,8 +657,8 @@ if App.GuiUp:
     class _SurfaceContoursCommand:
         def GetResources(self):
             return {
-                "MenuText": "Surface contours",
-                "ToolTip": "Detect semantic surface roles and create parametric contours",
+                "MenuText": _tr("Surface contours"),
+                "ToolTip": _tr("Detect semantic surface roles and create parametric contours"),
                 "Accel": "",
             }
 
