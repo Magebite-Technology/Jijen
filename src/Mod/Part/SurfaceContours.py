@@ -38,16 +38,82 @@ def checkpoint(stage, completed=None, total=None):
     _checkpoint(stage, completed, total)
 
 
+def _rounded(value, digits=9):
+    """Return a deterministic scalar representation for geometric values."""
+    return round(float(value), digits)
+
+
+def _point_signature(point):
+    return tuple(_rounded(getattr(point, axis)) for axis in ("x", "y", "z"))
+
+
+def _vector_signature(vector):
+    return _point_signature(vector)
+
+
+def _surface_signature(surface):
+    """Capture stable parameters for the common analytic FreeCAD surfaces."""
+    values = [type(surface).__name__]
+    for name in ("Radius", "MajorRadius", "MinorRadius", "SemiAngle"):
+        if hasattr(surface, name):
+            values.append((name, _rounded(getattr(surface, name))))
+    for name in ("Center", "Axis", "Location", "Apex"):
+        if hasattr(surface, name):
+            value = getattr(surface, name)
+            if name == "Location":
+                value = getattr(value, "Base", value)
+            if hasattr(value, "x") and hasattr(value, "y") and hasattr(value, "z"):
+                value = _point_signature(value)
+            values.append((name, value))
+    return tuple(values)
+
+
+def _stable_shape_signature(shape):
+    """Build a copy-stable, persisted geometric/topological signature.
+
+    BRep text contains implementation details that can differ after
+    ``TopoShape.copy()`` even when geometry is unchanged. The signature uses
+    canonical sorted descriptors instead: topology counts, vertex positions,
+    edge geometry and face surface parameters. Display triangulation is not
+    part of the identity.
+    """
+    vertices = tuple(sorted(_point_signature(vertex.Point) for vertex in shape.Vertexes))
+    edges = []
+    for edge in shape.Edges:
+        curve = edge.Curve
+        endpoints = tuple(sorted(_point_signature(vertex.Point) for vertex in edge.Vertexes))
+        edges.append((type(curve).__name__, _rounded(edge.Length), endpoints))
+    faces = []
+    for face in shape.Faces:
+        surface = face.Surface
+        box = face.BoundBox
+        faces.append((
+            _surface_signature(surface),
+            _rounded(face.Area),
+            _point_signature(face.CenterOfMass),
+            (_rounded(box.XMin), _rounded(box.YMin), _rounded(box.ZMin),
+             _rounded(box.XMax), _rounded(box.YMax), _rounded(box.ZMax)),
+        ))
+    return (
+        type(shape).__name__,
+        len(shape.Solids),
+        len(shape.Shells),
+        len(shape.Faces),
+        len(shape.Edges),
+        len(shape.Vertexes),
+        vertices,
+        tuple(sorted(edges)),
+        tuple(sorted(faces, key=repr)),
+    )
+
+
 def shape_revision(source):
     """Conservative persisted identity; never silently remap ordinal region IDs.
 
     Any BRep change invalidates an explicit selection. False invalidation is
     preferable to following the wrong surface. Empty selections track all.
     """
-    # Display triangulation is a cache, not a geometry edit. Clean an isolated
-    # copy so a redraw or save/reopen cannot invalidate a surface selection.
-    brep = resolve_shape(source).cleaned().exportBrepToString()
-    return hashlib.sha256(brep.encode("utf-8")).hexdigest()
+    return hashlib.sha256(repr(_stable_shape_signature(resolve_shape(source))).encode("utf-8")).hexdigest()
 
 
 def selection_is_current(obj):
