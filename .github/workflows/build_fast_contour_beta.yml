@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Jijen Fast Contour Beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_run_id:
+        description: Successful Jijen Windows Beta run ID (not run number)
+        required: true
+        type: string
+      base_sha256:
+        description: Exact SHA256 of that run's Windows x64 portable .7z
+        required: true
+        type: string
+  push:
+    branches:
+      - main
+      - feature/surface-contours-phase-1
+      - feature/surface-contours-progress-cancel
+    paths:
+      - .github/fast-contour-beta-request.json
+      - .github/scripts/build_fast_contour_beta.ps1
+      - .github/workflows/build_fast_contour_beta.yml
+      - .github/FAST_CONTOUR_BETA.md
+  pull_request:
+    paths:
+      - .github/scripts/build_fast_contour_beta.ps1
+      - .github/workflows/build_fast_contour_beta.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jijen-fast-contour-beta-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    outputs:
+      package_requested: ${{ steps.request.outputs.package_requested }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test overlay safety rules
+        shell: pwsh
+        run: ./.github/scripts/build_fast_contour_beta.ps1 -SelfTest
+      - name: Determine whether a package was requested
+        id: request
+        shell: pwsh
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          $requested = $env:GITHUB_EVENT_NAME -eq 'workflow_dispatch'
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:BEFORE_SHA -match '^[0-9a-f]{40}$' -and $env:BEFORE_SHA -notmatch '^0+$') {
+            $changed = @(git diff --name-only $env:BEFORE_SHA $env:GITHUB_SHA -- .github/fast-contour-beta-request.json)
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect package request' }
+            $requested = $changed -contains '.github/fast-contour-beta-request.json'
+          }
+          "package_requested=$($requested.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+  portable-beta:
+    needs: validate
+    if: needs.validate.outputs.package_requested == 'true' && github.event_name != 'pull_request'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FAST_BASE_RUN_ID: ${{ inputs.base_run_id }}
+      FAST_BASE_SHA256: ${{ inputs.base_sha256 }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate base, overlay modules, test and package
+        shell: pwsh
+        run: ./.github/scripts/build_fast_contour_beta.ps1
+      - name: Upload tested portable ZIP and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: jijen-fast-contour-beta-${{ github.run_id }}-${{ github.run_attempt }}
+          path: fast-beta-output/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fast-contour-beta-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: fast-beta-logs/*
+          if-no-files-found: ignore
+          retention-days: 14
