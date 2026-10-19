@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - feature/surface-contours-phase-1
+      - feature/surface-contours-progress-cancel
     paths:
       - src/Mod/Part/**
       - .github/scripts/*surface_contour*

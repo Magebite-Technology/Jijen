@@ -15,7 +15,7 @@ MODULES = (
     "TestRegionContours", "TestSurfaceContourGui", "TestSurfaceContourParametric",
     "TestSurfaceSemantics",
 )
-EXPECTED_TESTS = 69
+EXPECTED_TESTS = 84
 
 
 class DiagnosticResult(unittest.TextTestResult):
@@ -76,3 +76,4 @@ if __name__ == "__main__":
     except Exception:
         traceback.print_exc(file=sys.stdout)
         print("JIJEN_CONTOURS_FAILED", flush=True)
+

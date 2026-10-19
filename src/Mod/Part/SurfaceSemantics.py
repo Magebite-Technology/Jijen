@@ -13,11 +13,16 @@ import math
 import FreeCAD as App
 import Part
 
-from SurfaceContours import _resolve_shape, extract_region_contours
+from SurfaceContours import (
+    resolve_shape, extract_region_contours, checkpoint as _checkpoint, ContourCancelled,
+    GROUPING_POLICIES, STATUS_STALE_SELECTION, selection_is_current, shape_revision,
+    current_analysis,
+    DISTANCE_TOLERANCE,
+)
 
 
 _ROLES = ("all", "top", "bottom", "side", "sole_candidate", "unknown")
-_POLICIES = ("coplanar", "individual")
+_POLICIES = GROUPING_POLICIES
 
 
 @dataclass(frozen=True)
@@ -95,29 +100,52 @@ def _normalise_direction(value):
 
 
 def _face_normal(face):
-    """Return an averaged oriented normal, sampling curved parameter domains."""
+    """Trim-aware, Jacobian-weighted sampling with a coherence estimate.
+
+    Confidence is a heuristic, not a calibrated probability. Mixed normals
+    lower coherence instead of becoming a misleading high-confidence average.
+    """
     try:
         u0, u1, v0, v1 = face.ParameterRange
-        samples = ((0.2, 0.2), (0.2, 0.5), (0.2, 0.8),
-                   (0.5, 0.2), (0.5, 0.5), (0.5, 0.8),
-                   (0.8, 0.2), (0.8, 0.5), (0.8, 0.8))
-        total = App.Vector(0, 0, 0)
-        count = 0
-        for u_fraction, v_fraction in samples:
-            normal = face.normalAt(
-                u0 + (u1 - u0) * u_fraction,
-                v0 + (v1 - v0) * v_fraction,
-            )
+        if isinstance(face.Surface, Part.Plane):
+            normal = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
             if normal.Length > 1e-12:
                 normal.normalize()
-                total += normal
+                return normal, (), 1.0
+        if not all(math.isfinite(v) for v in (u0, u1, v0, v1)) or u1 <= u0 or v1 <= v0:
+            return None, ("Unbounded or degenerate parameter domain",), 0.0
+        samples = tuple(((i + 0.5) / 7, (j + 0.5) / 7)
+                        for i in range(7) for j in range(7))
+        total = App.Vector(0, 0, 0)
+        count = 0
+        weight_sum = 0.0
+        hu, hv = (u1 - u0) * 1e-5, (v1 - v0) * 1e-5
+        for u_fraction, v_fraction in samples:
+            _checkpoint("Classifying surfaces")
+            u, v = u0 + (u1 - u0) * u_fraction, v0 + (v1 - v0) * v_fraction
+            point = face.valueAt(u, v)
+            if not face.isInside(point, DISTANCE_TOLERANCE, True):
+                continue
+            normal = face.normalAt(u, v)
+            du = (face.valueAt(u + hu, v) - face.valueAt(u - hu, v)) * (0.5 / hu)
+            dv = (face.valueAt(u, v + hv) - face.valueAt(u, v - hv)) * (0.5 / hv)
+            weight = du.cross(dv).Length
+            if not math.isfinite(weight) or weight <= 0:
+                continue
+            if normal.Length > 1e-12:
+                normal.normalize()
+                total += normal * weight
+                weight_sum += weight
                 count += 1
-        if count and total.Length > 1e-12:
+        if count >= 3 and weight_sum > 0 and total.Length > 1e-12:
+            coherence = min(1.0, total.Length / weight_sum)
             total.normalize()
-            return total, ()
+            return total, (() if coherence >= 0.9 else ("Surface normals vary; confidence reduced",)), coherence
+    except ContourCancelled:
+        raise
     except Exception as error:
-        return None, ("Normal sampling failed: %s" % error,)
-    return None, ("Face has no usable oriented normal",)
+        return None, ("Normal sampling failed: %s" % error,), 0.0
+    return None, ("Insufficient interior samples or cancelling surface normals",), 0.0
 
 
 def _shape_projection_bounds(shape, direction):
@@ -136,34 +164,46 @@ def _shape_projection_bounds(shape, direction):
     return min(projections), max(projections)
 
 
-def _region_measure(shape, region):
+def _region_measure(shape, region, faces=None):
+    if faces is None:
+        faces = shape.Faces
     total_area = 0.0
     weighted_center = App.Vector(0, 0, 0)
     normals = []
+    sampled_quality = 0.0
+    sampled_area = 0.0
     surface_types = set()
     diagnostics = set(region.diagnostics)
     for face_index in region.face_indices:
-        face = shape.Faces[face_index]
+        _checkpoint("Classifying surfaces")
+        face = faces[face_index]
         try:
             area = max(float(face.Area), 0.0)
             center = face.CenterOfMass
             total_area += area
             weighted_center += center * area
             surface_types.add(type(face.Surface).__name__)
+        except ContourCancelled:
+            raise
         except Exception as error:
             diagnostics.add("Face measurement failed: %s" % error)
-        normal, normal_diagnostics = _face_normal(face)
+        normal, normal_diagnostics, quality = _face_normal(face)
         if normal is not None:
-            normals.append((normal, max(float(getattr(face, "Area", 0.0)), 1.0)))
+            weight = max(float(getattr(face, "Area", 0.0)), 0.0)
+            normals.append((normal, weight))
+            sampled_quality += quality * weight
+            sampled_area += weight
         diagnostics.update(normal_diagnostics)
     if total_area > 1e-12:
         center = weighted_center * (1.0 / total_area)
     else:
-        center = shape.Faces[region.face_indices[0]].CenterOfMass
+        center = faces[region.face_indices[0]].CenterOfMass
     if normals:
         normal_sum = App.Vector(0, 0, 0)
         for normal, weight in normals:
+            _checkpoint("Classifying surfaces")
             normal_sum += normal * weight
+        normal_coherence = normal_sum.Length / sampled_area if sampled_area > 0 else 0.0
         average_normal = normal_sum
         if average_normal.Length > 1e-12:
             average_normal.normalize()
@@ -171,7 +211,10 @@ def _region_measure(shape, region):
             average_normal = None
     else:
         average_normal = None
-    return total_area, center, average_normal, tuple(sorted(surface_types)), tuple(sorted(diagnostics))
+    quality = sampled_quality / total_area if total_area > 0 else 0.0
+    if normals and sampled_area > 0:
+        quality *= min(1.0, normal_coherence)
+    return total_area, center, average_normal, tuple(sorted(surface_types)), tuple(sorted(diagnostics)), quality
 
 
 def _orientation_role(score, tolerance):
@@ -204,7 +247,7 @@ def classify_surface_regions(
     settings = SemanticSettings(
         _normalise_direction(reference_direction), orientation_tolerance, sole_band
     )
-    shape = _resolve_shape(source)
+    shape = resolve_shape(source)
     if regions is None:
         from SurfaceRegions import detect_surface_regions
         regions = detect_surface_regions(source)
@@ -214,16 +257,19 @@ def classify_surface_regions(
     span = high - low
     if span <= 1e-12:
         span = 1.0
+    faces = shape.Faces
     classified = []
     diagnostics = set()
     for region in regions.regions:
-        area, center, average_normal, surface_types, region_diagnostics = _region_measure(shape, region)
+        _checkpoint("Classifying surfaces")
+        area, center, average_normal, surface_types, region_diagnostics, quality = _region_measure(shape, region, faces)
         score = 0.0 if average_normal is None else average_normal.dot(settings.reference_direction)
         elevation = max(0.0, min(1.0, (center.dot(settings.reference_direction) - low) / span))
         primary = _orientation_role(score, settings.orientation_tolerance)
         roles = ["all", primary]
         confidence = abs(score) if primary in ("top", "bottom") else 1.0 - abs(score)
         confidence = max(0.0, min(1.0, confidence))
+        confidence *= quality
         if average_normal is None:
             primary = "unknown"
             roles = ["all", "unknown"]
@@ -311,13 +357,15 @@ class SemanticRegionContourFeature:
         self._ensure(obj, "App::PropertyFloat", "SoleBand")
         obj.SoleBand = 0.35
         self._ensure(obj, "App::PropertyStringList", "RegionIds")
+        self._ensure(obj, "App::PropertyString", "SelectionRevision")
         self._ensure(obj, "App::PropertyStringList", "ResolvedRegionIds")
         self._ensure(obj, "App::PropertyIntegerList", "SourceFaceIndices")
         self._ensure(obj, "App::PropertyStringList", "SemanticRoles")
         self._ensure(obj, "App::PropertyString", "ContourStatus")
         self._ensure(obj, "App::PropertyString", "Diagnostics")
         self._ensure(obj, "App::PropertyString", "LastError")
-        for name in ("ResolvedRegionIds", "SourceFaceIndices", "SemanticRoles", "ContourStatus", "Diagnostics", "LastError"):
+        for name in ("SelectionRevision", "ResolvedRegionIds", "SourceFaceIndices", "SemanticRoles", "ContourStatus", "Diagnostics", "LastError"):
+            _checkpoint("Classifying surfaces")
             try:
                 obj.setEditorMode(name, 1)
             except Exception:
@@ -345,8 +393,18 @@ class SemanticRegionContourFeature:
             return
         try:
             from SurfaceRegions import detect_surface_regions
-            detection = detect_surface_regions(source, policy=obj.GroupingPolicy)
-            semantic = classify_surface_regions(
+            if not selection_is_current(obj):
+                self._clear(obj, STATUS_STALE_SELECTION, "Source geometry changed. Reselect the surface.")
+                return
+            cached = current_analysis(source, obj.GroupingPolicy)
+            semantic = cached[2] if cached else None
+            direction = _normalise_direction(obj.ReferenceDirection)
+            if semantic is not None and (semantic.settings.reference_direction != direction or
+                    semantic.settings.orientation_tolerance != obj.OrientationTolerance.Value or
+                    semantic.settings.sole_band != obj.SoleBand):
+                cached = semantic = None
+            detection = cached[1] if cached else detect_surface_regions(source, policy=obj.GroupingPolicy)
+            semantic = semantic or classify_surface_regions(
                 source,
                 detection,
                 reference_direction=obj.ReferenceDirection,
@@ -364,10 +422,11 @@ class SemanticRegionContourFeature:
             )
             contour_by_id = {
                 result.region_id: result
-                for result in extract_region_contours(source, detection)
+                for result in (cached[3] if cached else extract_region_contours(source, selected))
             }
             contours = [contour_by_id[item.region_id] for item in selected if item.region_id in contour_by_id]
             for result in contours:
+                _checkpoint("Classifying surfaces")
                 diagnostics.extend(result.diagnostics)
             self._set_metadata(obj, selected, diagnostics)
             valid = [result for result in contours if result.status == "ok" and result.wires]
@@ -377,10 +436,12 @@ class SemanticRegionContourFeature:
                 obj.ContourStatus = "no_role_match"
             elif not wires:
                 obj.ContourStatus = "no_boundary"
-            elif len(valid) == len(contours):
+            elif len(valid) == len(contours) and not missing:
                 obj.ContourStatus = "ok"
             else:
                 obj.ContourStatus = "partial"
+        except ContourCancelled:
+            raise
         except Exception as error:
             self._clear(obj, "error")
             obj.LastError = str(error)
@@ -392,6 +453,7 @@ class SemanticRegionContourFeature:
         obj.SemanticRoles = [_role_summary(item) for item in selected]
         messages = set(diagnostics)
         for item in selected:
+            _checkpoint("Classifying surfaces")
             messages.update(item.diagnostics)
         obj.Diagnostics = "; ".join(sorted(messages))
 
@@ -432,9 +494,11 @@ def create_semantic_region_contour(
         raise ValueError("Region IDs must be non-empty strings")
     if len(set(requested)) != len(requested):
         raise ValueError("Region IDs must be unique")
+    created_name = None
     document.openTransaction("Create semantic surface contour")
     try:
         obj = document.addObject("Part::FeaturePython", "SemanticRegionContour")
+        created_name = obj.Name
         obj.Label = "%s contours (%s)" % (role.replace("_", " "), source.Label)
         SemanticRegionContourFeature(obj)
         obj.Source = source
@@ -444,12 +508,17 @@ def create_semantic_region_contour(
         obj.OrientationTolerance = tolerance
         obj.SoleBand = band
         obj.RegionIds = requested
+        obj.SelectionRevision = policy + ":" + shape_revision(source) if requested else ""
         if App.GuiUp:
             obj.ViewObject.LineColor = (0.95, 0.55, 0.1)
             obj.ViewObject.LineWidth = 3.0
         document.recompute()
+        _checkpoint("Finishing preview")
         document.commitTransaction()
     except Exception:
         document.abortTransaction()
+        if created_name and document.getObject(created_name) is not None:
+            document.removeObject(created_name)
         raise
     return obj
+

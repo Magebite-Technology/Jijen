@@ -51,8 +51,8 @@ class TestSurfaceContourParametric(unittest.TestCase):
 
         preview.GroupingPolicy = "individual"
         self.doc.recompute()
-        self.assertEqual(preview.ResolvedRegionIds, ["Region1"])
-        self.assertEqual(len(preview.SourceFaceIndices), 1)
+        self.assertEqual(preview.ContourStatus, "stale_selection")
+        self.assertEqual(preview.ResolvedRegionIds, [])
 
     def test_source_change_updates_shape_and_metadata(self):
         source = self._source(fixtures.cube().shape)
@@ -63,8 +63,28 @@ class TestSurfaceContourParametric(unittest.TestCase):
         source.Shape = fixtures.pyramid().shape
         self.doc.recompute()
         self.assertNotEqual(preview.Shape.exportBrepToString(), before)
-        self.assertEqual(preview.ResolvedRegionIds, ["Region1"])
-        self.assertEqual(preview.ContourStatus, "ok")
+        self.assertEqual(preview.ResolvedRegionIds, [])
+        self.assertEqual(preview.ContourStatus, "stale_selection")
+        self.assertTrue(preview.Shape.isNull())
+
+    def test_explicit_selection_survives_save_reopen_without_retargeting(self):
+        import tempfile
+        from pathlib import Path
+        source = self._source(fixtures.cube().shape)
+        preview = contours.create_parametric_region_contour(source, region_ids=["Region1"])
+        name, source_name = preview.Name, source.Name
+        with tempfile.TemporaryDirectory() as folder:
+            filename = str(Path(folder) / "selection.FCStd")
+            self.doc.saveAs(filename)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(filename)
+            preview = self.doc.getObject(name)
+            preview.touch()
+            self.doc.recompute()
+            self.assertEqual(preview.ContourStatus, "ok", preview.LastError)
+            self.doc.getObject(source_name).Shape = fixtures.pyramid().shape
+            self.doc.recompute()
+            self.assertEqual(preview.ContourStatus, "stale_selection")
 
     def test_policy_change_rebuilds_region_partition(self):
         source = self._source(fixtures.cube(True).shape)
@@ -96,3 +116,4 @@ class TestSurfaceContourParametric(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -6,9 +6,160 @@ parameterisation cut, not a physical boundary. Region grouping is Phase 3.
 """
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+import hashlib
 
 import FreeCAD as App
 import Part
+
+
+class ContourCancelled(Exception):
+    """An interactive contour operation was cancelled at a safe checkpoint."""
+
+
+_progress_callback = ContextVar("surface_contour_progress", default=None)
+_prepared_analysis = ContextVar("surface_contour_prepared_analysis", default=None)
+
+# Shared contracts; callers must not depend on private geometry helpers.
+GROUPING_POLICIES = ("coplanar", "individual")
+STATUS_STALE_SELECTION = "stale_selection"
+ANGLE_TOLERANCE_DEGREES = 0.0001
+DISTANCE_TOLERANCE = 0.0000001
+
+
+def resolve_shape(source):
+    """Resolve a BRep in document coordinates without modifying the source."""
+    return _resolve_shape(source)
+
+
+def checkpoint(stage, completed=None, total=None):
+    """Report progress and honour the current operation's cancellation token."""
+    _checkpoint(stage, completed, total)
+
+
+def _rounded(value, digits=9):
+    """Return a deterministic scalar representation for geometric values."""
+    return round(float(value), digits)
+
+
+def _point_signature(point):
+    return tuple(_rounded(getattr(point, axis)) for axis in ("x", "y", "z"))
+
+
+def _vector_signature(vector):
+    return _point_signature(vector)
+
+
+def _surface_signature(surface):
+    """Capture stable parameters for the common analytic FreeCAD surfaces."""
+    values = [type(surface).__name__]
+    for name in ("Radius", "MajorRadius", "MinorRadius", "SemiAngle"):
+        if hasattr(surface, name):
+            values.append((name, _rounded(getattr(surface, name))))
+    for name in ("Center", "Axis", "Location", "Apex"):
+        if hasattr(surface, name):
+            value = getattr(surface, name)
+            if name == "Location":
+                value = getattr(value, "Base", value)
+            if hasattr(value, "x") and hasattr(value, "y") and hasattr(value, "z"):
+                value = _point_signature(value)
+            values.append((name, value))
+    return tuple(values)
+
+
+def _stable_shape_signature(shape):
+    """Build a copy-stable, persisted geometric/topological signature.
+
+    BRep text contains implementation details that can differ after
+    ``TopoShape.copy()`` even when geometry is unchanged. The signature uses
+    canonical sorted descriptors instead: topology counts, vertex positions,
+    edge geometry and face surface parameters. Display triangulation is not
+    part of the identity.
+    """
+    vertices = tuple(sorted(_point_signature(vertex.Point) for vertex in shape.Vertexes))
+    edges = []
+    for edge in shape.Edges:
+        curve = edge.Curve
+        endpoints = tuple(sorted(_point_signature(vertex.Point) for vertex in edge.Vertexes))
+        edges.append((type(curve).__name__, _rounded(edge.Length), endpoints))
+    faces = []
+    for face in shape.Faces:
+        surface = face.Surface
+        box = face.BoundBox
+        faces.append((
+            _surface_signature(surface),
+            _rounded(face.Area),
+            _point_signature(face.CenterOfMass),
+            (_rounded(box.XMin), _rounded(box.YMin), _rounded(box.ZMin),
+             _rounded(box.XMax), _rounded(box.YMax), _rounded(box.ZMax)),
+        ))
+    return (
+        type(shape).__name__,
+        len(shape.Solids),
+        len(shape.Shells),
+        len(shape.Faces),
+        len(shape.Edges),
+        len(shape.Vertexes),
+        vertices,
+        tuple(sorted(edges)),
+        tuple(sorted(faces, key=repr)),
+    )
+
+
+def shape_revision(source):
+    """Conservative persisted identity; never silently remap ordinal region IDs.
+
+    Any BRep change invalidates an explicit selection. False invalidation is
+    preferable to following the wrong surface. Empty selections track all.
+    """
+    return hashlib.sha256(repr(_stable_shape_signature(resolve_shape(source))).encode("utf-8")).hexdigest()
+
+
+def selection_is_current(obj):
+    if not getattr(obj, "RegionIds", ()):
+        return True
+    recorded = getattr(obj, "SelectionRevision", "")
+    return bool(recorded) and recorded == str(obj.GroupingPolicy) + ":" + shape_revision(obj.Source)
+
+
+@contextmanager
+def prepared_analysis(source, detection, semantic, results, revision):
+    """Reuse a verified snapshot only during initial GUI feature creation."""
+    token = _prepared_analysis.set((source, detection, semantic, results, revision))
+    try:
+        yield
+    finally:
+        _prepared_analysis.reset(token)
+
+
+def current_analysis(source, policy):
+    cached = _prepared_analysis.get()
+    if cached and cached[0] is source and cached[1].settings.policy == policy:
+        if cached[4] == shape_revision(source):
+            return cached
+    return None
+
+
+@contextmanager
+def contour_operation(callback):
+    """Scope progress/cancellation to one operation; restore even on failure.
+
+    Core geometry remains GUI-independent. Callbacks may raise ContourCancelled.
+    Interactive callers must prevent document edits while pumping GUI events.
+    """
+    token = _progress_callback.set(callback)
+    try:
+        _checkpoint("Reading geometry")
+        yield
+    finally:
+        _progress_callback.reset(token)
+
+
+def _checkpoint(stage, completed=None, total=None):
+    callback = _progress_callback.get()
+    if callback is not None:
+        callback(stage, completed, total)
 
 
 class ContourInputError(ValueError):
@@ -42,6 +193,8 @@ def _resolve_shape(source):
                 shape = Part.getShape(
                     source, needSubElement=False, transform=True
                 )
+        except ContourCancelled:
+            raise
         except Exception as error:
             raise ContourInputError("unsupported_input", str(error)) from error
     else:
@@ -59,17 +212,17 @@ def _assemble_wires(edges):
     Geometrically coincident but distinct vertices are never merged. Closed
     single-edge curves contribute two incidences to the same vertex.
     """
-    vertices, ends, adjacency = [], [], []
+    vertex_index = _NativeShapeIndex()
+    ends, adjacency = [], []
 
     def vertex_id(vertex):
-        for i, existing in enumerate(vertices):
-            if vertex.isSame(existing):
-                return i
-        vertices.append(vertex)
-        adjacency.append([])
-        return len(vertices) - 1
+        index = vertex_index.add(vertex)
+        if index == len(adjacency):
+            adjacency.append([])
+        return index
 
     for i, edge in enumerate(edges):
+        _checkpoint("Extracting contours")
         first, last = edge.firstVertex(True), edge.lastVertex(True)
         if first.isNull() or last.isNull():
             return (), "invalid_geometry", ("Boundary edge has no endpoint topology",)
@@ -81,16 +234,21 @@ def _assemble_wires(edges):
         return (), "non_manifold", ("Boundary branches at a shared vertex",)
 
     unused = set(range(len(edges)))
+    seeds = iter(range(len(edges)))
     wires = []
     while unused:
+        _checkpoint("Extracting contours")
         # Prefer an open endpoint so a broken chain is returned in full.
-        seed = min(unused)
+        seed = next(index for index in seeds if index in unused)
         component = {seed}
         pending = [seed]
         while pending:
+            _checkpoint("Extracting contours")
             current = pending.pop()
             for vertex in ends[current]:
+                _checkpoint("Extracting contours")
                 for neighbour in adjacency[vertex]:
+                    _checkpoint("Extracting contours")
                     if neighbour in unused and neighbour not in component:
                         component.add(neighbour)
                         pending.append(neighbour)
@@ -99,6 +257,7 @@ def _assemble_wires(edges):
         )
         current, ordered = start, []
         while True:
+            _checkpoint("Extracting contours")
             following = next((i for i in adjacency[current] if i in unused), None)
             if following is None:
                 break
@@ -127,11 +286,14 @@ def _extract_face(face, index):
         if not face.isValid():
             return FaceContour(index, "invalid_geometry", diagnostics=("Invalid source face",))
         edges = []
+        edge_index = _NativeShapeIndex()
         for wire in face.Wires:
+            _checkpoint("Extracting contours")
             for edge in wire.OrderedEdges:
+                _checkpoint("Extracting contours")
                 if edge.Degenerated or edge.isSeam(face):
                     continue
-                if any(edge.isSame(existing) for existing in edges):
+                if edge_index.add(edge) != len(edges):
                     return FaceContour(
                         index,
                         "non_manifold",
@@ -142,6 +304,8 @@ def _extract_face(face, index):
             return FaceContour(index, "no_boundary")
         wires, status, diagnostics = _assemble_wires(edges)
         return FaceContour(index, status, wires, diagnostics)
+    except ContourCancelled:
+        raise
     except Exception as error:
         return FaceContour(index, "invalid_geometry", diagnostics=(str(error),))
 
@@ -182,6 +346,7 @@ def create_contour_preview(source, face_indices=None, document=None):
     document.openTransaction("Preview individual face contours")
     try:
         for result in pending:
+            _checkpoint("Extracting contours")
             obj = document.addObject("Part::Feature", "FaceContour")
             obj.Label = result.face_name + " contour"
             obj.Shape = Part.makeCompound(list(result.wires))
@@ -197,6 +362,7 @@ def create_contour_preview(source, face_indices=None, document=None):
                 obj.ViewObject.LineWidth = 3.0
             created.append(obj)
         document.recompute()
+        _checkpoint("Finishing preview")
         document.commitTransaction()
     except Exception:
         document.abortTransaction()
@@ -226,12 +392,16 @@ class _NativeShapeIndex:
     def add(self, shape):
         bucket = self.buckets.setdefault(shape.hashCode(), [])
         for index in bucket:
+            _checkpoint("Extracting contours")
             if shape.isSame(self.shapes[index]):
                 return index
         index = len(self.shapes)
         self.shapes.append(shape)
         bucket.append(index)
         return index
+
+
+TopologyIndex = _NativeShapeIndex
 
 
 def _normalise_region_groups(regions, face_count):
@@ -245,6 +415,7 @@ def _normalise_region_groups(regions, face_count):
     normalised = []
     claimed = set()
     for ordinal, region in enumerate(regions, 1):
+        _checkpoint("Extracting contours")
         indices = getattr(region, "face_indices", region)
         try:
             indices = tuple(sorted(set(indices)))
@@ -270,33 +441,42 @@ def _normalise_region_groups(regions, face_count):
     return tuple(normalised)
 
 
-def _extract_region_boundary(shape, face_indices):
+def _extract_region_boundary(shape, face_indices, faces=None):
+    if faces is None:
+        faces = shape.Faces
     edge_index = _NativeShapeIndex()
     occurrences = []
     diagnostics = set()
     try:
         for face_index in face_indices:
-            face = shape.Faces[face_index]
+            _checkpoint("Extracting contours")
+            face = faces[face_index]
             if not face.isValid():
                 return (), "invalid_geometry", ("Invalid source face",)
             for wire in face.Wires:
+                _checkpoint("Extracting contours")
                 for edge in wire.OrderedEdges:
+                    _checkpoint("Extracting contours")
                     if edge.Degenerated or edge.isSeam(face):
                         continue
                     edge_id = edge_index.add(edge)
                     # Keep shared native vertices until boundary assembly.
                     # Independently copying edges disconnects closed loops.
                     occurrences.append((edge_id, edge, face_index))
+    except ContourCancelled:
+        raise
     except Exception as error:
         return (), "invalid_geometry", (str(error),)
 
     grouped = {}
     for edge_id, edge, face_index in occurrences:
+        _checkpoint("Extracting contours")
         grouped.setdefault(edge_id, []).append((edge, face_index))
 
     boundary_edges = []
     non_manifold = False
     for edge_id in sorted(grouped):
+        _checkpoint("Extracting contours")
         members = grouped[edge_id]
         if len(members) == 1:
             boundary_edges.append(members[0][0])
@@ -332,10 +512,12 @@ def extract_region_contours(source, regions=None):
         from SurfaceRegions import detect_surface_regions
 
         regions = detect_surface_regions(shape)
-    groups = _normalise_region_groups(regions, len(shape.Faces))
+    faces = shape.Faces
+    groups = _normalise_region_groups(regions, len(faces))
     contours = []
-    for region_id, component_id, face_indices, input_status, input_diagnostics in groups:
-        wires, extracted_status, extracted_diagnostics = _extract_region_boundary(shape, face_indices)
+    for ordinal, (region_id, component_id, face_indices, input_status, input_diagnostics) in enumerate(groups):
+        _checkpoint("Extracting contours", ordinal, len(groups))
+        wires, extracted_status, extracted_diagnostics = _extract_region_boundary(shape, face_indices, faces)
         diagnostics = tuple(sorted(set(input_diagnostics).union(extracted_diagnostics)))
         status = input_status if input_status != "ok" else extracted_status
         contours.append(
@@ -379,6 +561,7 @@ def create_region_contour_preview(source, region_contours, document=None):
     _resolve_shape(source)
     seen = set()
     for result in pending:
+        _checkpoint("Extracting contours")
         region_id = getattr(result, "region_id", None)
         if not region_id or region_id in seen:
             raise ValueError("Region contour IDs must be present and unique")
@@ -394,6 +577,7 @@ def create_region_contour_preview(source, region_contours, document=None):
     document.openTransaction("Preview surface region contours")
     try:
         for result in valid:
+            _checkpoint("Extracting contours")
             obj = document.addObject("Part::Feature", "RegionContour")
             obj.Label = "%s contour" % result.region_id
             obj.Shape = Part.makeCompound(list(result.wires))
@@ -415,6 +599,7 @@ def create_region_contour_preview(source, region_contours, document=None):
                 obj.ViewObject.LineWidth = 3.0
             created.append(obj)
         document.recompute()
+        _checkpoint("Finishing preview")
         document.commitTransaction()
     except Exception:
         document.abortTransaction()
@@ -440,6 +625,7 @@ class RegionContourFeature:
         if obj.GroupingPolicy not in self._POLICIES:
             obj.GroupingPolicy = "coplanar"
         self._ensure_property(obj, "App::PropertyStringList", "RegionIds")
+        self._ensure_property(obj, "App::PropertyString", "SelectionRevision")
         self._ensure_property(obj, "App::PropertyStringList", "ResolvedRegionIds")
         self._ensure_property(obj, "App::PropertyStringList", "ComponentIds")
         self._ensure_property(obj, "App::PropertyIntegerList", "SourceFaceIndices")
@@ -447,6 +633,7 @@ class RegionContourFeature:
         self._ensure_property(obj, "App::PropertyString", "Diagnostics")
         self._ensure_property(obj, "App::PropertyString", "LastError")
         for name in (
+            "SelectionRevision",
             "ResolvedRegionIds",
             "ComponentIds",
             "SourceFaceIndices",
@@ -473,6 +660,7 @@ class RegionContourFeature:
         )
         messages = set(diagnostics)
         for result in selected:
+            _checkpoint("Extracting contours")
             messages.update(result.diagnostics)
         obj.Diagnostics = "; ".join(sorted(messages))
 
@@ -490,12 +678,19 @@ class RegionContourFeature:
 
         try:
             from SurfaceRegions import detect_surface_regions
-
-            detection = detect_surface_regions(
-                source, policy=getattr(obj, "GroupingPolicy", "coplanar")
-            )
-            results = extract_region_contours(source, detection)
+            if not selection_is_current(obj):
+                obj.Shape = Part.Shape()
+                self._set_result_metadata(obj, (), ("Source geometry changed. Reselect the surface; ordinal region IDs are not persistent.",))
+                obj.ContourStatus = STATUS_STALE_SELECTION
+                return
+            cached = current_analysis(source, obj.GroupingPolicy)
+            detection = cached[1] if cached else detect_surface_regions(
+                source, policy=getattr(obj, "GroupingPolicy", "coplanar"))
             requested = set(getattr(obj, "RegionIds", ()))
+            chosen = [region for region in detection.regions
+                      if not requested or region.region_id in requested]
+            results = (tuple(r for r in cached[3] if not requested or r.region_id in requested)
+                       if cached else extract_region_contours(source, chosen))
             selected = (
                 [result for result in results if result.region_id in requested]
                 if requested
@@ -517,10 +712,12 @@ class RegionContourFeature:
                 obj.ContourStatus = "no_region"
             elif not wires:
                 obj.ContourStatus = "no_boundary"
-            elif len(valid) == len(selected):
+            elif len(valid) == len(selected) and not missing:
                 obj.ContourStatus = "ok"
             else:
                 obj.ContourStatus = "partial"
+        except ContourCancelled:
+            raise
         except Exception as error:
             obj.Shape = Part.Shape()
             obj.ResolvedRegionIds = []
@@ -556,20 +753,27 @@ def create_parametric_region_contour(
     if len(set(requested)) != len(requested):
         raise ValueError("Region IDs must be unique")
 
+    created_name = None
     document.openTransaction("Create parametric surface contour")
     try:
         obj = document.addObject("Part::FeaturePython", "RegionContourParametric")
+        created_name = obj.Name
         obj.Label = "Surface contours (%s)" % source.Label
         RegionContourFeature(obj)
         obj.Source = source
         obj.GroupingPolicy = policy
         obj.RegionIds = requested
+        obj.SelectionRevision = policy + ":" + shape_revision(source) if requested else ""
         if App.GuiUp:
             obj.ViewObject.LineColor = (0.1, 0.55, 1.0)
             obj.ViewObject.LineWidth = 3.0
         document.recompute()
+        _checkpoint("Finishing preview")
         document.commitTransaction()
     except Exception:
         document.abortTransaction()
+        if created_name and document.getObject(created_name) is not None:
+            document.removeObject(created_name)
         raise
     return obj
+

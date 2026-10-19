@@ -6,22 +6,27 @@ and semantic segmentation are deliberately not inferred by this policy.
 """
 
 from dataclasses import dataclass
+from collections import deque
 import math
 
 import Part
-from SurfaceContours import _resolve_shape
+from SurfaceContours import (
+    resolve_shape, checkpoint as _checkpoint, ContourCancelled, TopologyIndex,
+    ANGLE_TOLERANCE_DEGREES, DISTANCE_TOLERANCE,
+)
 
 
 @dataclass(frozen=True)
 class DetectionSettings:
     policy: str = "coplanar"
-    angle_tolerance: float = 0.0001  # degrees, oriented normals
-    distance_tolerance: float = 0.0000001  # document units (mm)
+    angle_tolerance: float = ANGLE_TOLERANCE_DEGREES
+    distance_tolerance: float = DISTANCE_TOLERANCE  # document units (mm)
 
     def __post_init__(self):
         if self.policy not in ("individual", "coplanar"):
             raise ValueError("Policy must be 'individual' or 'coplanar'")
         for name in ("angle_tolerance", "distance_tolerance"):
+            _checkpoint("Detecting regions")
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(name + " must be a positive finite number")
@@ -51,22 +56,7 @@ class RegionDetection:
     adjacency: tuple  # manifold, shared-edge face pairs within one component
 
 
-class _TopologyIndex:
-    """Hash buckets accelerate identity lookup; collisions still use isSame."""
-
-    def __init__(self):
-        self.shapes = []
-        self.buckets = {}
-
-    def add(self, shape):
-        bucket = self.buckets.setdefault(shape.hashCode(), [])
-        for index in bucket:
-            if shape.isSame(self.shapes[index]):
-                return index
-        index = len(self.shapes)
-        self.shapes.append(shape)
-        bucket.append(index)
-        return index
+_TopologyIndex = TopologyIndex
 
 
 def _component_owners(shape, faces):
@@ -77,6 +67,7 @@ def _component_owners(shape, faces):
     """
     index = _TopologyIndex()
     for face in faces:
+        _checkpoint("Detecting regions")
         index.add(face)
     owners = [set() for _ in faces]
     component = 0
@@ -85,10 +76,12 @@ def _component_owners(shape, faces):
         nonlocal component
         if part.ShapeType in ("Compound", "CompSolid"):
             for child in part.childShapes():
+                _checkpoint("Detecting regions")
                 visit(child)
         elif part.ShapeType in ("Solid", "Shell", "Face"):
             component += 1
             for face in part.Faces:
+                _checkpoint("Detecting regions")
                 owners[index.add(face)].add(component)
 
     visit(shape)
@@ -123,7 +116,8 @@ def _coplanar(first, second, settings):
 
 
 def detect_surface_regions(
-    source, policy="coplanar", angle_tolerance=0.0001, distance_tolerance=0.0000001
+    source, policy="coplanar", angle_tolerance=ANGLE_TOLERANCE_DEGREES,
+    distance_tolerance=DISTANCE_TOLERANCE
 ):
     """Partition all resolved faces, without changing topology or the document.
 
@@ -134,7 +128,8 @@ def detect_surface_regions(
     local, not persistent references. No GUI/camera state is consulted.
     """
     settings = DetectionSettings(policy, angle_tolerance, distance_tolerance)
-    shape = _resolve_shape(source)
+    shape = resolve_shape(source)
+    _checkpoint("Reading geometry")
     faces = shape.Faces
     owners = _component_owners(shape, faces)
     messages = [set() for _ in faces]
@@ -143,6 +138,7 @@ def detect_surface_regions(
     edges = _TopologyIndex()
     incidence = []
     for i, face in enumerate(faces):
+        _checkpoint("Detecting regions")
         if len(owners[i]) != 1:
             statuses[i] = "non_manifold"
             messages[i].add("Face has ambiguous component ownership")
@@ -151,21 +147,27 @@ def detect_surface_regions(
                 raise ValueError("Invalid source face")
             planes[i] = _plane(face)
             for wire in face.Wires:
+                _checkpoint("Detecting regions")
                 for edge in wire.OrderedEdges:
+                    _checkpoint("Detecting regions")
                     if edge.Degenerated or edge.isSeam(face):
                         continue
                     edge_id = edges.add(edge)
                     if edge_id == len(incidence):
                         incidence.append([])
                     incidence[edge_id].append(i)
+        except ContourCancelled:
+            raise
         except Exception as error:
             statuses[i] = "invalid_geometry"
             messages[i].add(str(error))
 
     adjacency = set()
     for edge_id, members in enumerate(incidence):
+        _checkpoint("Detecting regions")
         if len(members) > 2 or len(set(members)) != len(members):
             for i in members:
+                _checkpoint("Detecting regions")
                 if statuses[i] == "ok":
                     statuses[i] = "non_manifold"
                 messages[i].add("Non-manifold boundary incidence at Edge%d" % (edge_id + 1))
@@ -176,24 +178,54 @@ def detect_surface_regions(
 
     neighbours = [set() for _ in faces]
     for a, b in sorted(adjacency):
+        _checkpoint("Detecting regions")
         if statuses[a] == statuses[b] == "ok":
             neighbours[a].add(b)
             neighbours[b].add(a)
     remaining = set(range(len(faces)))
+    seeds = iter(range(len(faces)))
     regions = []
     while remaining:
-        seed = min(remaining)
+        _checkpoint("Detecting regions")
+        seed = next(index for index in seeds if index in remaining)
         remaining.remove(seed)
         members = [seed]
-        pending = [seed]
+        pending = deque([seed])
+        # Parallel analytic planes admit an exact interval test: complete-link
+        # distance compatibility is max(offset)-min(offset) <= tolerance.
+        # Fall back to pairwise checks as soon as a normal differs. This keeps
+        # the no-drift contract without quadratic scans on subdivided planes.
+        seed_plane = planes[seed]
+        parallel = seed_plane is not None
+        normal = seed_plane[1] if parallel else None
+        low = high = seed_plane[0].dot(normal) if parallel else 0.0
         if policy == "coplanar" and statuses[seed] == "ok":
             while pending:
-                current = pending.pop(0)
+                _checkpoint("Detecting regions")
+                current = pending.popleft()
                 for candidate in sorted(neighbours[current] & remaining):
-                    if all(_coplanar(planes[candidate], planes[i], settings) for i in members):
+                    _checkpoint("Detecting regions")
+                    compatible = True
+                    plane = planes[candidate]
+                    same_normal = parallel and plane is not None and (
+                        plane[1].x, plane[1].y, plane[1].z) == (normal.x, normal.y, normal.z)
+                    if same_normal:
+                        offset = plane[0].dot(normal)
+                        compatible = max(high, offset) - min(low, offset) <= settings.distance_tolerance
+                    else:
+                        for member in members:
+                            _checkpoint("Grouping connected faces")
+                            if not _coplanar(plane, planes[member], settings):
+                                compatible = False
+                                break
+                    if compatible:
                         remaining.remove(candidate)
                         members.append(candidate)
                         pending.append(candidate)
+                        if same_normal:
+                            low, high = min(low, offset), max(high, offset)
+                        else:
+                            parallel = False
         component_id = "+".join("Component%d" % c for c in sorted(owners[seed]))
         regions.append(
             SurfaceRegion(
@@ -205,3 +237,4 @@ def detect_surface_regions(
             )
         )
     return RegionDetection(settings, tuple(regions), tuple(sorted(adjacency)))
+
