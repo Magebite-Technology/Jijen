@@ -6,8 +6,10 @@ on:
   push:
     branches:
       - feature/surface-contours-phase-1
+      - feature/surface-contours-progress-cancel
     paths:
       - .github/beta-build-request.txt
+      - .github/workflows/build_beta_windows.yml
 
 # Python changes use fast tests; change beta-build-request.txt for a full beta.
 
