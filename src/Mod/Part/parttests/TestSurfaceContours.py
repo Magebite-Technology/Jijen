@@ -125,10 +125,19 @@ class TestSurfaceContours(unittest.TestCase):
         import SurfaceRegions
         from unittest.mock import patch
         original = SurfaceRegions._coplanar
-        with patch.object(SurfaceRegions, "_coplanar", wraps=original) as comparisons:
+        parallel_comparisons = []
+        def checked(first, second, settings):
+            result = original(first, second, settings)
+            if result:
+                parallel_comparisons.append((first, second))
+            return result
+        with patch.object(SurfaceRegions, "_coplanar", side_effect=checked) as comparisons:
             result = SurfaceRegions.detect_surface_regions(fixtures.cube(True).shape)
         self.assertEqual(len(result.regions), 6)
-        self.assertLess(comparisons.call_count, 24)
+        # Cross-side neighbours must still be rejected, but parallel members
+        # must use the interval path rather than pairwise complete-link scans.
+        self.assertEqual(parallel_comparisons, [])
+        self.assertLessEqual(comparisons.call_count, 24)
 
     def test_prepared_analysis_restores_scope_and_avoids_repeated_detection(self):
         import SurfaceRegions
