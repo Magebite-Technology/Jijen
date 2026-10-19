@@ -8,6 +8,7 @@ parameterisation cut, not a physical boundary. Region grouping is Phase 3.
 from dataclasses import dataclass
 from contextlib import contextmanager
 from contextvars import ContextVar
+import hashlib
 
 import FreeCAD as App
 import Part
@@ -18,6 +19,58 @@ class ContourCancelled(Exception):
 
 
 _progress_callback = ContextVar("surface_contour_progress", default=None)
+_prepared_analysis = ContextVar("surface_contour_prepared_analysis", default=None)
+
+# Shared contracts; callers must not depend on private geometry helpers.
+GROUPING_POLICIES = ("coplanar", "individual")
+STATUS_STALE_SELECTION = "stale_selection"
+ANGLE_TOLERANCE_DEGREES = 0.0001
+DISTANCE_TOLERANCE = 0.0000001
+
+
+def resolve_shape(source):
+    """Resolve a BRep in document coordinates without modifying the source."""
+    return _resolve_shape(source)
+
+
+def checkpoint(stage, completed=None, total=None):
+    """Report progress and honour the current operation's cancellation token."""
+    _checkpoint(stage, completed, total)
+
+
+def shape_revision(source):
+    """Conservative persisted identity; never silently remap ordinal region IDs.
+
+    Any BRep change invalidates an explicit selection. False invalidation is
+    preferable to following the wrong surface. Empty selections track all.
+    """
+    brep = resolve_shape(source).exportBrepToString()
+    return hashlib.sha256(brep.encode("utf-8")).hexdigest()
+
+
+def selection_is_current(obj):
+    if not getattr(obj, "RegionIds", ()):
+        return True
+    recorded = getattr(obj, "SelectionRevision", "")
+    return bool(recorded) and recorded == str(obj.GroupingPolicy) + ":" + shape_revision(obj.Source)
+
+
+@contextmanager
+def prepared_analysis(source, detection, semantic, results, revision):
+    """Reuse a verified snapshot only during initial GUI feature creation."""
+    token = _prepared_analysis.set((source, detection, semantic, results, revision))
+    try:
+        yield
+    finally:
+        _prepared_analysis.reset(token)
+
+
+def current_analysis(source, policy):
+    cached = _prepared_analysis.get()
+    if cached and cached[0] is source and cached[1].settings.policy == policy:
+        if cached[4] == shape_revision(source):
+            return cached
+    return None
 
 
 @contextmanager
@@ -113,11 +166,12 @@ def _assemble_wires(edges):
         return (), "non_manifold", ("Boundary branches at a shared vertex",)
 
     unused = set(range(len(edges)))
+    seeds = iter(range(len(edges)))
     wires = []
     while unused:
         _checkpoint("Extracting contours")
         # Prefer an open endpoint so a broken chain is returned in full.
-        seed = min(unused)
+        seed = next(index for index in seeds if index in unused)
         component = {seed}
         pending = [seed]
         while pending:
@@ -164,13 +218,14 @@ def _extract_face(face, index):
         if not face.isValid():
             return FaceContour(index, "invalid_geometry", diagnostics=("Invalid source face",))
         edges = []
+        edge_index = _NativeShapeIndex()
         for wire in face.Wires:
             _checkpoint("Extracting contours")
             for edge in wire.OrderedEdges:
                 _checkpoint("Extracting contours")
                 if edge.Degenerated or edge.isSeam(face):
                     continue
-                if any(edge.isSame(existing) for existing in edges):
+                if edge_index.add(edge) != len(edges):
                     return FaceContour(
                         index,
                         "non_manifold",
@@ -276,6 +331,9 @@ class _NativeShapeIndex:
         self.shapes.append(shape)
         bucket.append(index)
         return index
+
+
+TopologyIndex = _NativeShapeIndex
 
 
 def _normalise_region_groups(regions, face_count):
@@ -499,6 +557,7 @@ class RegionContourFeature:
         if obj.GroupingPolicy not in self._POLICIES:
             obj.GroupingPolicy = "coplanar"
         self._ensure_property(obj, "App::PropertyStringList", "RegionIds")
+        self._ensure_property(obj, "App::PropertyString", "SelectionRevision")
         self._ensure_property(obj, "App::PropertyStringList", "ResolvedRegionIds")
         self._ensure_property(obj, "App::PropertyStringList", "ComponentIds")
         self._ensure_property(obj, "App::PropertyIntegerList", "SourceFaceIndices")
@@ -506,6 +565,7 @@ class RegionContourFeature:
         self._ensure_property(obj, "App::PropertyString", "Diagnostics")
         self._ensure_property(obj, "App::PropertyString", "LastError")
         for name in (
+            "SelectionRevision",
             "ResolvedRegionIds",
             "ComponentIds",
             "SourceFaceIndices",
@@ -550,14 +610,19 @@ class RegionContourFeature:
 
         try:
             from SurfaceRegions import detect_surface_regions
-
-            detection = detect_surface_regions(
-                source, policy=getattr(obj, "GroupingPolicy", "coplanar")
-            )
+            if not selection_is_current(obj):
+                obj.Shape = Part.Shape()
+                self._set_result_metadata(obj, (), ("Source geometry changed. Reselect the surface; ordinal region IDs are not persistent.",))
+                obj.ContourStatus = STATUS_STALE_SELECTION
+                return
+            cached = current_analysis(source, obj.GroupingPolicy)
+            detection = cached[1] if cached else detect_surface_regions(
+                source, policy=getattr(obj, "GroupingPolicy", "coplanar"))
             requested = set(getattr(obj, "RegionIds", ()))
             chosen = [region for region in detection.regions
                       if not requested or region.region_id in requested]
-            results = extract_region_contours(source, chosen)
+            results = (tuple(r for r in cached[3] if not requested or r.region_id in requested)
+                       if cached else extract_region_contours(source, chosen))
             selected = (
                 [result for result in results if result.region_id in requested]
                 if requested
@@ -579,7 +644,7 @@ class RegionContourFeature:
                 obj.ContourStatus = "no_region"
             elif not wires:
                 obj.ContourStatus = "no_boundary"
-            elif len(valid) == len(selected):
+            elif len(valid) == len(selected) and not missing:
                 obj.ContourStatus = "ok"
             else:
                 obj.ContourStatus = "partial"
@@ -630,6 +695,7 @@ def create_parametric_region_contour(
         obj.Source = source
         obj.GroupingPolicy = policy
         obj.RegionIds = requested
+        obj.SelectionRevision = policy + ":" + shape_revision(source) if requested else ""
         if App.GuiUp:
             obj.ViewObject.LineColor = (0.1, 0.55, 1.0)
             obj.ViewObject.LineWidth = 3.0
@@ -642,3 +708,4 @@ def create_parametric_region_contour(
             document.removeObject(created_name)
         raise
     return obj
+
