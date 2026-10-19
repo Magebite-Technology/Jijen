@@ -6,17 +6,21 @@ and semantic segmentation are deliberately not inferred by this policy.
 """
 
 from dataclasses import dataclass
+from collections import deque
 import math
 
 import Part
-from SurfaceContours import _resolve_shape, _checkpoint, ContourCancelled
+from SurfaceContours import (
+    resolve_shape, checkpoint as _checkpoint, ContourCancelled, TopologyIndex,
+    ANGLE_TOLERANCE_DEGREES, DISTANCE_TOLERANCE,
+)
 
 
 @dataclass(frozen=True)
 class DetectionSettings:
     policy: str = "coplanar"
-    angle_tolerance: float = 0.0001  # degrees, oriented normals
-    distance_tolerance: float = 0.0000001  # document units (mm)
+    angle_tolerance: float = ANGLE_TOLERANCE_DEGREES
+    distance_tolerance: float = DISTANCE_TOLERANCE  # document units (mm)
 
     def __post_init__(self):
         if self.policy not in ("individual", "coplanar"):
@@ -52,23 +56,7 @@ class RegionDetection:
     adjacency: tuple  # manifold, shared-edge face pairs within one component
 
 
-class _TopologyIndex:
-    """Hash buckets accelerate identity lookup; collisions still use isSame."""
-
-    def __init__(self):
-        self.shapes = []
-        self.buckets = {}
-
-    def add(self, shape):
-        bucket = self.buckets.setdefault(shape.hashCode(), [])
-        for index in bucket:
-            _checkpoint("Detecting regions")
-            if shape.isSame(self.shapes[index]):
-                return index
-        index = len(self.shapes)
-        self.shapes.append(shape)
-        bucket.append(index)
-        return index
+_TopologyIndex = TopologyIndex
 
 
 def _component_owners(shape, faces):
@@ -128,7 +116,8 @@ def _coplanar(first, second, settings):
 
 
 def detect_surface_regions(
-    source, policy="coplanar", angle_tolerance=0.0001, distance_tolerance=0.0000001
+    source, policy="coplanar", angle_tolerance=ANGLE_TOLERANCE_DEGREES,
+    distance_tolerance=DISTANCE_TOLERANCE
 ):
     """Partition all resolved faces, without changing topology or the document.
 
@@ -139,7 +128,7 @@ def detect_surface_regions(
     local, not persistent references. No GUI/camera state is consulted.
     """
     settings = DetectionSettings(policy, angle_tolerance, distance_tolerance)
-    shape = _resolve_shape(source)
+    shape = resolve_shape(source)
     _checkpoint("Reading geometry")
     faces = shape.Faces
     owners = _component_owners(shape, faces)
@@ -194,29 +183,49 @@ def detect_surface_regions(
             neighbours[a].add(b)
             neighbours[b].add(a)
     remaining = set(range(len(faces)))
+    seeds = iter(range(len(faces)))
     regions = []
     while remaining:
         _checkpoint("Detecting regions")
-        seed = min(remaining)
+        seed = next(index for index in seeds if index in remaining)
         remaining.remove(seed)
         members = [seed]
-        pending = [seed]
+        pending = deque([seed])
+        # Parallel analytic planes admit an exact interval test: complete-link
+        # distance compatibility is max(offset)-min(offset) <= tolerance.
+        # Fall back to pairwise checks as soon as a normal differs. This keeps
+        # the no-drift contract without quadratic scans on subdivided planes.
+        seed_plane = planes[seed]
+        parallel = seed_plane is not None
+        normal = seed_plane[1] if parallel else None
+        low = high = seed_plane[0].dot(normal) if parallel else 0.0
         if policy == "coplanar" and statuses[seed] == "ok":
             while pending:
                 _checkpoint("Detecting regions")
-                current = pending.pop(0)
+                current = pending.popleft()
                 for candidate in sorted(neighbours[current] & remaining):
                     _checkpoint("Detecting regions")
                     compatible = True
-                    for member in members:
-                        _checkpoint("Grouping connected faces")
-                        if not _coplanar(planes[candidate], planes[member], settings):
-                            compatible = False
-                            break
+                    plane = planes[candidate]
+                    same_normal = parallel and plane is not None and (
+                        plane[1].x, plane[1].y, plane[1].z) == (normal.x, normal.y, normal.z)
+                    if same_normal:
+                        offset = plane[0].dot(normal)
+                        compatible = max(high, offset) - min(low, offset) <= settings.distance_tolerance
+                    else:
+                        for member in members:
+                            _checkpoint("Grouping connected faces")
+                            if not _coplanar(plane, planes[member], settings):
+                                compatible = False
+                                break
                     if compatible:
                         remaining.remove(candidate)
                         members.append(candidate)
                         pending.append(candidate)
+                        if same_normal:
+                            low, high = min(low, offset), max(high, offset)
+                        else:
+                            parallel = False
         component_id = "+".join("Component%d" % c for c in sorted(owners[seed]))
         regions.append(
             SurfaceRegion(
@@ -228,3 +237,4 @@ def detect_surface_regions(
             )
         )
     return RegionDetection(settings, tuple(regions), tuple(sorted(adjacency)))
+
